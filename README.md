@@ -75,7 +75,7 @@ cp .env.example .env
 
 ### Step-by-step pipeline
 
-Each stage can be run independently, which is useful for re-running a single step after manual corrections. Some stage have multiple options
+Each stage can be run independently, which is useful for re-running a single step after manual corrections. Some stages have multiple options.
 
 ```bash
 # 1. Render PDF pages to PNG images
@@ -85,7 +85,9 @@ python cli.py render my_document.pdf
 
 # Option 1 [recommended]: Use Anthropic API (API key and funds required)
 python cli.py analyze my_document.pdf
-# Option 2 : Upload the PDF to [claude.ai](https://claude.ai) with the prompt from `prompts/layout_analysis.md`, copy the JSON response into a file, then import it. (This will also create alt-text; no API key required):
+# Option 2: Upload the PDF to claude.ai with the prompt from prompts/layout_analysis.md,
+#           copy the JSON response into a file, then import it.
+#           (Also creates alt-text; no API key required.)
 python cli.py import-boxes my_document.pdf claude_response.json
 # Option 3: Run locally (Surya required)
 python cli.py analyze my_document.pdf --engine surya
@@ -112,7 +114,7 @@ python cli.py ocr my_document.pdf
 # 6. Open the OCR editor to correct text line mistakes
 python gui/ocr_editor.py data/my_document/
 
-# 6b. Optaionally, open the table editor to correct table OCR (image + Markdown side by side)
+# 6b. Optionally, open the table editor to correct table OCR (image + Markdown side by side)
 python gui/table_editor.py data/my_document/
 
 # 7. Build the document structure (paragraphs, headings, footnotes…)
@@ -127,9 +129,7 @@ python cli.py assemble my_document.pdf
 python cli.py export my_document.pdf --formats html,epub
 ```
 
-Edits made in the GUI tools are saved to `ocr_edited.json` and `boxes.json` in the project directory and are automatically used by subsequent pipeline steps.
-
-In both cases, continue the pipeline from the `extract` step once you're happy with `boxes.json`.
+Edits made in the GUI tools are saved to `ocr_edited.json` and `boxes.json` in the project directory and are automatically used by subsequent pipeline steps. Once you're happy with `boxes.json`, continue from the `extract` step.
 
 Surya requires PyTorch and will download model weights on first use (~1–2 GB). It is slower than Claude on CPU but produces good results and does not require an API key.
 
@@ -221,7 +221,7 @@ python gui/bbox_editor.py data/my_document/
 - **Teal — Table**: table region; cropped, excluded from page OCR, and OCR'd separately
 - **Blue — Exclusion**: boilerplate on this page (headers, footers, page numbers)
 - **Purple — Caption zone**: lines in this zone are tagged as captions in OCR output
-- **Orange — Notes zone**: lines in this zone are tagged as footnotes in OCR output
+- **Orange — Endnote zone**: lines in this zone are tagged as footnotes in OCR output
 
 ### OCR Line Editor
 
