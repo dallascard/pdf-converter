@@ -1,0 +1,34 @@
+[project]
+name = "pdf-converter"
+version = "0.1.0"
+description = "Convert scanned PDFs to Markdown, HTML, and EPUB using Claude Vision OCR"
+requires-python = ">=3.11"
+dependencies = [
+    # PDF processing
+    "pdf2image>=1.17.0",
+    # Image processing
+    "Pillow>=10.0.0",
+    # Claude API
+    "anthropic>=0.25.0",
+    # Local OCR fallback
+    "pytesseract>=0.3.10",
+    # HTML/EPUB export
+    "weasyprint>=60.0",
+    "ebooklib>=0.18",
+    "jinja2>=3.1.0",
+    # Markdown processing
+    "markdown>=3.5.0",
+    # GUI (pinned <6.8 — PyQt6-Qt6 6.8+ requires glibc 2.39 on aarch64, node:20 has 2.36)
+    "PyQt6>=6.6.0,<6.8",
+    # CLI
+    "click>=8.1.0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "requests>=2.33.1",
+]
+
+[project.optional-dependencies]
+# Install with: uv sync --extra surya
+# Note: pulls in PyTorch (~500 MB); GPU strongly recommended for speed.
+# transformers pinned <5 — surya 0.17.x has a SuryaDecoderConfig bug triggered by transformers 5+
+surya = ["surya-ocr>=0.6", "transformers>=4.56.1,<5"]
