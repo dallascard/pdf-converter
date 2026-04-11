@@ -31,17 +31,14 @@ paths are added to the page manifest as ``"masked_image_path"``.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
 import config
 from core.layout_analyzer import load_boxes
-from core.claude_client import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +51,6 @@ def extract_figures(
     project_dir: Path,
     page_records: list[dict],
     force: bool = False,
-    generate_alt_text: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """
     Crop figure and table regions and write masked page images.
@@ -145,10 +141,6 @@ def extract_figures(
     # Persist updated page records (with masked_image_path added)
     (project_dir / "pages.json").write_text(json.dumps(page_records, indent=2))
 
-    # Generate alt-text for figures if requested
-    if generate_alt_text and figure_records:
-        _generate_alt_texts(figure_records, images_dir)
-
     figures_path.write_text(json.dumps(figure_records, indent=2))
     tables_path.write_text(json.dumps(table_records, indent=2))
     logger.info("Extracted %d figures, %d tables.", len(figure_records), len(table_records))
@@ -169,73 +161,6 @@ def load_tables(project_dir: Path) -> list[dict]:
     if not path.exists():
         return []   # tables.json is optional — documents may have none
     return json.loads(path.read_text())
-
-
-# ---------------------------------------------------------------------------
-# Alt-text generation
-# ---------------------------------------------------------------------------
-
-def generate_alt_text_for_figure(
-    project_dir: Path, figure_record: dict
-) -> str:
-    """
-    Call Claude Vision on a single figure crop and return alt-text.
-
-    The result is stored in *figure_record["alt_text"]* and the figures.json
-    file is updated in place.
-    """
-    images_dir = project_dir
-    crop_path = images_dir / figure_record["crop_path"]
-    if not crop_path.exists():
-        logger.warning("Crop not found: %s", crop_path)
-        return ""
-
-    client = get_client()
-    img_b64 = base64.standard_b64encode(crop_path.read_bytes()).decode()
-
-    prompt = (
-        f"Write a concise alt-text description for this image, suitable for "
-        f"an academic document. Maximum {config.ALT_TEXT_MAX_CHARS} characters. "
-        "Return only the alt-text, no preamble."
-    )
-
-    try:
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=200,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": img_b64,
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        )
-        alt = response.content[0].text.strip()[: config.ALT_TEXT_MAX_CHARS]
-        figure_record["alt_text"] = alt
-        return alt
-    except Exception as exc:
-        logger.warning("Alt-text generation failed for %s: %s", figure_record["id"], exc)
-        return ""
-
-
-def _generate_alt_texts(figure_records: list[dict], images_dir: Path) -> None:
-    """Generate alt-text for all figures that don't already have one."""
-    client = get_client()
-    for rec in figure_records:
-        if rec.get("alt_text"):
-            continue
-        logger.info("  Generating alt-text for %s …", rec["id"])
-        generate_alt_text_for_figure(images_dir.parent, rec)
 
 
 # ---------------------------------------------------------------------------

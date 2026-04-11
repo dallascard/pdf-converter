@@ -1,8 +1,10 @@
 """
 ocr.py — Extract text from masked page images.
 
-Primary engine : Claude Vision (sends masked page PNG, gets structured JSON)
-Fallback engine: Tesseract (via pytesseract)
+Supported engines
+-----------------
+- Surya  (default when installed; better accuracy, handles math and multilingual)
+- Tesseract  (lightweight fallback, no GPU required)
 
 Output — ocr_raw.json
 ---------------------
@@ -13,7 +15,7 @@ A list of page results, one per page:
     [
         {
             "page_number": 1,
-            "engine": "claude",
+            "engine": "surya",
             "lines": [
                 {
                     "line_id": "p1_l001",
@@ -30,73 +32,20 @@ A list of page results, one per page:
     heading1 | heading2 | heading3 | body | footnote | caption | other
 
 ``bbox`` is fractional (0–1), relative to the *original* (unmasked) page.
-When Tesseract is used as fallback, bboxes are derived from Tesseract's
-word-level data and every line is typed as "body" (heading detection happens
-later in structure.py).
+When Tesseract is used, bboxes are derived from its word-level data and
+every line is typed as "body" (heading detection happens later in structure.py).
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import re
 from pathlib import Path
 
 import config
-from core.claude_client import get_client
 from core.layout_analyzer import ensure_paragraph_boxes
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Claude prompt
-# ---------------------------------------------------------------------------
-
-_OCR_PROMPT = """\
-You are performing OCR on a scanned document page.
-The image has already been pre-processed: figure regions, table regions, and
-page boilerplate (headers, footers, page numbers) have been masked out with
-white rectangles.  Transcribe only the visible text.
-
-Return a JSON object with a single key "lines" containing a list of line
-objects. Each object must have:
-
-  "text"  – the transcribed text of this line (preserve original spelling,
-             hyphenation, and punctuation; do NOT merge hyphenated line-breaks
-             across lines)
-  "type"  – one of: heading1, heading2, heading3, body, footnote, caption, other
-  "bbox"  – bounding box as fractions of page dimensions:
-              {"x": <left>, "y": <top>, "w": <width>, "h": <height>}
-
-Rules for "type":
-- heading1: chapter titles or the largest headings on the page
-- heading2: section headings
-- heading3: sub-section headings
-- footnote: text that appears at the bottom of the text area, typically
-            introduced by a superscript number or symbol
-- caption: a line that labels a figure, table, or plate (e.g. "Fig. 3.")
-- body: all other regular paragraph text
-- other: anything that does not fit the above categories
-
-Preserve reading order (top-to-bottom, then left-to-right for multi-column).
-Return ONLY the raw JSON object, no markdown fences, no explanation.
-If the page has no visible text, return {"lines": []}.
-"""
-
-_TABLE_OCR_PROMPT = """\
-You are performing OCR on a cropped table region from a scanned document.
-Transcribe the table as a GitHub-flavored Markdown table.
-
-Rules:
-- Use | to separate columns and --- for the header separator row.
-- Preserve all cell content faithfully, including numbers, units, and symbols.
-- If the table has no clear header row, use the first row as the header.
-- If the table structure is too complex or unclear for Markdown, output the
-  cell content as plain text rows, one row per line, cells separated by " | ".
-
-Return ONLY the Markdown table (or plain-text fallback), no explanation.
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -106,14 +55,13 @@ Return ONLY the Markdown table (or plain-text fallback), no explanation.
 def run_ocr(
     project_dir: Path,
     page_records: list[dict],
-    engine: str = "claude",
+    engine: str = "tesseract",
     force: bool = False,
 ) -> list[dict]:
     """
     Run OCR on all pages and write *project_dir/ocr_raw.json*.
 
-    *engine* is ``"claude"``, ``"tesseract"``, or ``"surya"``.
-    If Claude fails for a page, Tesseract is used automatically as fallback.
+    *engine* is ``"tesseract"`` or ``"surya"``.
     After page OCR, table crops (if any) are also OCR'd and saved to tables.json.
 
     Returns the list of page OCR results.
@@ -157,12 +105,7 @@ def run_ocr(
 
         logger.info("  OCR page %d (%s) …", page_num, engine)
 
-        if engine == "claude":
-            page_result = _ocr_claude(img_path, page_num)
-            if page_result is None:
-                logger.warning("  Claude failed for page %d; falling back to Tesseract.", page_num)
-                page_result = _ocr_tesseract(img_path, page_num)
-        elif engine == "surya":
+        if engine == "surya":
             page_result = _ocr_surya(img_path, page_num, surya_models)
         else:
             page_result = _ocr_tesseract(img_path, page_num)
@@ -196,13 +139,13 @@ def run_ocr(
 
 def run_table_ocr(
     project_dir: Path,
-    engine: str = "claude",
+    engine: str = "tesseract",
     force: bool = False,
 ) -> list[dict]:
     """
     OCR table crops listed in tables.json and store the result in each record.
 
-    Uses a table-specific prompt for Claude/Surya to produce Markdown tables.
+    Uses Surya's TableRecPredictor for structure-aware Markdown table output.
     Tesseract output is stored as preformatted text.
     Updates tables.json in place.
     """
@@ -232,9 +175,7 @@ def run_table_ocr(
             continue
 
         logger.info("    OCR table %s …", rec["id"])
-        if engine == "claude":
-            content, fmt = _ocr_table_claude(crop_path)
-        elif engine == "surya":
+        if engine == "surya":
             content, fmt = _ocr_table_surya(crop_path, surya_models)
         else:
             content, fmt = _ocr_table_tesseract(crop_path)
@@ -268,82 +209,6 @@ def load_ocr(project_dir: Path, edited: bool = False) -> list[dict]:
 def save_edited_ocr(project_dir: Path, results: list[dict]) -> None:
     """Persist user-edited OCR results to ocr_edited.json."""
     (project_dir / "ocr_edited.json").write_text(json.dumps(results, indent=2))
-
-
-# ---------------------------------------------------------------------------
-# Claude Vision engine
-# ---------------------------------------------------------------------------
-
-def _ocr_claude(img_path: Path, page_num: int) -> dict | None:
-    """Return a page result dict, or None on failure."""
-    try:
-        client = get_client()
-        img_b64 = base64.standard_b64encode(img_path.read_bytes()).decode()
-
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=4096,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": img_b64,
-                            },
-                        },
-                        {"type": "text", "text": _OCR_PROMPT},
-                    ],
-                }
-            ],
-        )
-        raw = response.content[0].text.strip()
-        lines = _parse_ocr_response(raw, page_num)
-        return {"page_number": page_num, "engine": "claude", "lines": lines}
-    except Exception as exc:
-        logger.error("Claude OCR error on page %d: %s", page_num, exc)
-        return None
-
-
-def _parse_ocr_response(raw: str, page_num: int) -> list[dict]:
-    """Parse Claude's JSON OCR response into a list of line dicts."""
-    raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"```$", "", raw, flags=re.MULTILINE)
-    raw = raw.strip()
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse OCR JSON for page %d: %r", page_num, raw[:200])
-        return []
-
-    lines = []
-    for idx, item in enumerate(data.get("lines", [])):
-        line_id = f"p{page_num}_l{idx + 1:03d}"
-        bbox = item.get("bbox", {})
-        lines.append(
-            {
-                "line_id": line_id,
-                "text": str(item.get("text", "")).strip(),
-                "type": _normalise_type(item.get("type", "body")),
-                "bbox": {
-                    "x": float(bbox.get("x", 0)),
-                    "y": float(bbox.get("y", 0)),
-                    "w": float(bbox.get("w", 1)),
-                    "h": float(bbox.get("h", 0.02)),
-                },
-            }
-        )
-    return lines
-
-
-def _normalise_type(t: str) -> str:
-    valid = {"heading1", "heading2", "heading3", "body", "footnote", "caption", "other"}
-    t = str(t).lower().strip()
-    return t if t in valid else "body"
 
 
 # ---------------------------------------------------------------------------
@@ -410,40 +275,6 @@ def _ocr_surya(img_path: Path, page_num: int, surya_models) -> dict:
 # Table OCR helpers
 # ---------------------------------------------------------------------------
 
-def _ocr_table_claude(crop_path: Path) -> tuple[str, str]:
-    """OCR a table crop with Claude, returning (content, format)."""
-    try:
-        client = get_client()
-        img_b64 = base64.standard_b64encode(crop_path.read_bytes()).decode()
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": img_b64,
-                        },
-                    },
-                    {"type": "text", "text": _TABLE_OCR_PROMPT},
-                ],
-            }],
-        )
-        content = response.content[0].text.strip()
-        # Strip any markdown fences Claude added despite instructions
-        content = re.sub(r"^```[a-z]*\n?", "", content, flags=re.MULTILINE)
-        content = re.sub(r"```$", "", content, flags=re.MULTILINE).strip()
-        fmt = "markdown" if "|" in content else "preformatted"
-        return content, fmt
-    except Exception as exc:
-        logger.warning("Claude table OCR failed for %s: %s", crop_path.name, exc)
-        return "", ""
-
-
 def _ocr_table_surya(crop_path: Path, surya_models) -> tuple[str, str]:
     """OCR a table crop with Surya's dedicated TableRecPredictor.
 
@@ -495,7 +326,6 @@ def _ocr_table_surya(crop_path: Path, surya_models) -> tuple[str, str]:
         cell_texts: list[str] = [""] * len(cells)
 
         if valid_crops:
-            # Use a full-image bbox per crop so Surya OCRs the whole cell
             bboxes_per_crop = [[[0, 0, c.width, c.height]] for c in valid_crops]
             ocr_preds = rec_predictor(
                 valid_crops,
@@ -513,7 +343,7 @@ def _ocr_table_surya(crop_path: Path, surya_models) -> tuple[str, str]:
             r = cell.row_id
             c = cell.col_id if cell.col_id is not None else 0
             if 0 <= r < num_rows and 0 <= c < num_cols:
-                grid[r][c] = text.replace("|", "\\|")  # escape pipes in cell text
+                grid[r][c] = text.replace("|", "\\|")
 
         # --- Format as Markdown table -------------------------------------
         header_row_ids = {row.row_id for row in result.rows if row.is_header}
@@ -556,7 +386,6 @@ def _get_surya_table_rec_predictor():
     return _surya_table_rec_predictor
 
 
-
 def _ocr_table_tesseract(crop_path: Path) -> tuple[str, str]:
     """OCR a table crop with Tesseract, returning preformatted text."""
     try:
@@ -572,7 +401,7 @@ def _ocr_table_tesseract(crop_path: Path) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Tesseract fallback engine
+# Tesseract engine
 # ---------------------------------------------------------------------------
 
 def _ocr_tesseract(img_path: Path, page_num: int) -> dict:
@@ -638,7 +467,7 @@ def _tesseract_data_to_lines(data: dict, W: int, H: int, page_num: int) -> list[
             {
                 "line_id": f"p{page_num}_l{idx + 1:03d}",
                 "text": text,
-                "type": "body",  # Tesseract has no heading detection
+                "type": "body",
                 "bbox": {
                     "x": x0 / W,
                     "y": y0 / H,
@@ -648,7 +477,6 @@ def _tesseract_data_to_lines(data: dict, W: int, H: int, page_num: int) -> list[
             }
         )
 
-    # Sort by vertical position
     lines.sort(key=lambda l: l["bbox"]["y"])
     return lines
 
@@ -659,7 +487,6 @@ def _tesseract_data_to_lines(data: dict, W: int, H: int, page_num: int) -> list[
 
 def _ocr_pil_image_lines(img, page_num: int, engine: str, surya_models) -> list[dict]:
     """OCR a PIL Image crop; return [{text, bbox}] with crop-local fractional coords."""
-    import io
     W, H = img.size
 
     if engine == "surya":
@@ -680,7 +507,7 @@ def _ocr_pil_image_lines(img, page_num: int, engine: str, surya_models) -> list[
         lines.sort(key=lambda l: l["bbox"]["y"])
         return lines
 
-    elif engine == "tesseract":
+    else:  # tesseract
         try:
             import pytesseract
             from collections import defaultdict
@@ -714,32 +541,6 @@ def _ocr_pil_image_lines(img, page_num: int, engine: str, surya_models) -> list[
             return lines
         except Exception as exc:
             logger.warning("Tesseract zone OCR failed: %s", exc)
-            return []
-
-    else:  # claude
-        try:
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            img_b64 = base64.standard_b64encode(buf.getvalue()).decode()
-            client = get_client()
-            response = client.messages.create(
-                model=config.CLAUDE_MODEL,
-                max_tokens=1024,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {
-                            "type": "base64", "media_type": "image/png", "data": img_b64,
-                        }},
-                        {"type": "text", "text": _OCR_PROMPT},
-                    ],
-                }],
-            )
-            raw = response.content[0].text.strip()
-            parsed = _parse_ocr_response(raw, page_num)
-            return [{"text": l["text"], "bbox": l["bbox"]} for l in parsed if l["text"]]
-        except Exception as exc:
-            logger.warning("Claude zone OCR failed: %s", exc)
             return []
 
 
@@ -788,7 +589,6 @@ def _ocr_zone_crops(
             if not raw.get("text", "").strip():
                 continue
             lb = raw.get("bbox", {})
-            # Convert crop-local fractional bbox → page-level fractional bbox
             page_bbox = {
                 "x": zone["x"] + lb.get("x", 0) * zone["w"],
                 "y": zone["y"] + lb.get("y", 0) * zone["h"],
@@ -818,10 +618,6 @@ def _classify_zone_lines(lines: list[dict], page_boxes: dict) -> None:
     Heading zones  → type "heading1" / "heading2" / "heading3" (level from zone)
     Caption zones  → type "caption"  (attached to nearest figure by structure.py)
     Note zones     → type "footnote" (collected as endnotes by assembler.py)
-
-    This is most useful for Surya/Tesseract output, which labels everything "body".
-    Claude Vision usually classifies these correctly on its own, but zone overrides
-    still apply so GUI-drawn zones take precedence.
     """
     heading_zones = page_boxes.get("headings", [])
     caption_zones = page_boxes.get("captions", [])

@@ -4,11 +4,11 @@ Convert scanned PDF documents to Markdown, HTML, and EPUB using Claude Vision fo
 
 ## Features
 
-- **Claude Vision OCR** — sends each page to Claude for high-quality text extraction, with Tesseract or [Surya](https://github.com/VikParuchuri/surya) as local fallbacks
-- **Automated layout detection** — figures, tables, and boilerplate (headers, footers, page numbers) are identified automatically before OCR runs
+- **Surya layout detection** — figures, tables, and boilerplate (headers, footers, page numbers) are identified automatically before OCR runs; manual annotation and claude.ai import are also supported
+- **Surya / Tesseract OCR** — Surya produces better results (especially for math and multilingual text); Tesseract is a lighter fallback requiring no GPU
 - **Table extraction** — table regions are cropped, masked out of OCR pages, and OCR'd separately to produce clean Markdown tables
 - **Figure extraction** — image regions are cropped and saved separately; OCR never runs on figure interiors
-- **Alt-text generation** — optional Claude Vision pass to write accessibility descriptions for each figure
+- **Alt-text generation** — optional step to write accessibility descriptions for figures, via Claude API or claude.ai (no API key required)
 - **Structure detection** — headings, footnotes, and figure captions are identified and tagged
 - **Footnote → endnote conversion** — all footnotes are collected and appended as a numbered endnote section
 - **Multi-format export** — output to `.md`, `.html`, and `.epub`; `--self-contained` embeds images as base64 for a single shareable HTML file
@@ -55,16 +55,19 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 cd pdf-converter
 
-# Create virtual environment and install all dependencies
-uv sync
-
-# Alternatively, to enable Surya as an option, instead run with --extra surya (Note that this will be more resource intensive)
+# Standard install — includes Surya (required for 'analyze' and recommended for 'ocr')
+# Note: downloads PyTorch and Surya model weights (~1-2 GB on first use)
 uv sync --extra surya
+
+# Minimal install — no Surya; use 'init-boxes' or 'import-boxes' for layout annotation,
+# and '--engine tesseract' for OCR
+uv sync
 
 # Activate the environment
 source .venv/bin/activate
 
-# Optionally, copy the environment template and add your Anthropic API key to enable use of the Anthropic API (funds required)
+# Optional: copy the environment template and add your Anthropic API key
+# (only needed for alt-text generation)
 cp .env.example .env
 # Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
@@ -77,93 +80,80 @@ cp .env.example .env
 
 Each stage can be run independently, which is useful for re-running a single step after manual corrections. Some stages have multiple options.
 
+#### Part 1: Layout analysis:
+
 ```bash
 # 1. Render PDF pages to PNG images
 python cli.py render my_document.pdf
 
-# 2. Auto-detect figure regions and boilerplate exclusion zones (requires API key)
+# 2. Optionally, correct rotational skew in scanned pages
+python cli.py deskew my_document.pdf               # all pages
+python cli.py deskew my_document.pdf --pages 2,5   # specific pages only
 
-# Option 1 [recommended]: Use Anthropic API (API key and funds required)
+# 3. Detect layout (figures, tables, exclusion zones)
+# Option A: Use Surya (requires installing with --extra surya; see above)
 python cli.py analyze my_document.pdf
-# Option 2: Upload the PDF to claude.ai with the prompt from prompts/layout_analysis.md,
-#           copy the JSON response into a file, then import it.
-#           (Also creates alt-text; no API key required.)
+# Option B: Use claude.ai model for layout detection (no API key required, but less reliable than Surya):
+#   Upload the PDF with the prompt from prompts/layout_analysis.md, then:
 python cli.py import-boxes my_document.pdf claude_response.json
-# Option 3: Run locally (Surya required)
-python cli.py analyze my_document.pdf --engine surya
-# Option 4: Skip the layout analysis, and just create and empty boxes file (to be drawn manually)
+# Option C: Draw boxes manually instead
 python cli.py init-boxes my_document.pdf
 
-# 3. Open the bounding box editor to review/correct detections
+# 4. Edit bounding boxes in the editor to review/correct detections
 python gui/bbox_editor.py data/my_document/
 
-# 4. Crop figures and produce masked page images
-# Option 1: Just extract the figures
+# 5. Extract final figures and produce masked page images
 python cli.py extract my_document.pdf
-# Option 2: Also create alt-text (Anthropic API key and funds required)
-python cli.py extract my_document.pdf --alt-text
 
-# 5. Run OCR on the masked pages
-# Option 1 [recommended]: Use Tesseract
-python cli.py ocr my_document.pdf --engine tesseract
-# Option 2: Use Surya (slower, better for math, multilingual, and challenging documents)
+# 6. Optionally, generate alt-text for figures
+# Option A: Automatically via Claude API (API key and funds required)
+python cli.py get-alt-text my_document.pdf
+# Option B (step 1): Export boxes for uploading to claude.ai (no API key required)
+python cli.py export-boxes my_document.pdf  # writes figures_prompt.json
+# Option B (step 2): Upload pages, boxes, and prompt (in prompts/alt_text.md), and save Claude's response as alt_text_response.json
+# Option B (step 3): save and then import alt-text from claude.ai
+python cli.py import-alt-text my_document.pdf alt_text_response.json
+
+# 7. Run OCR on all pages
+# Option A: Use Surya (better accuracy, handles math and multilingual text; may produce more complex output)
 python cli.py ocr my_document.pdf --engine surya
-# Option 3: Use Anthropic API (API key and funds required)
-python cli.py ocr my_document.pdf
+# Option B: Use Tesseract (lighter-weight; reliable for simple documents)
+python cli.py ocr my_document.pdf --engine tesseract
 
-# 6. Open the OCR editor to correct text line mistakes
+# 8. Optionally, open the OCR editor to correct text line mistakes
 python gui/ocr_editor.py data/my_document/
 
-# 6b. Optionally, open the table editor to correct table OCR (image + Markdown side by side)
+# 9. Optionally, open the table editor to correct table OCR (image + Markdown side by side)
 python gui/table_editor.py data/my_document/
 
-# 7. Build the document structure (paragraphs, headings, footnotes…)
-python cli.py structure my_document.pdf
-
-# 8. Assemble Markdown
+# 10. Assemble Markdown (builds document structure and writes output/document.md)
 python cli.py assemble my_document.pdf
 
-# 8b. Edit the Markdown (in data/<dir>/output/document.md) to correct structural and other issues in any Markdown editor
+#11. Edit the Markdown (in data/<dir>/output/document.md) to correct any remaining issues (ordering, captions, notes, headers, etc.)
 
-# 9. Export to HTML and/or EPUB
+# 12. Export to HTML and/or EPUB
 python cli.py export my_document.pdf --formats html,epub
 ```
 
-Edits made in the GUI tools are saved to `ocr_edited.json` and `boxes.json` in the project directory and are automatically used by subsequent pipeline steps. Once you're happy with `boxes.json`, continue from the `extract` step.
+Edits made in the GUI tools are saved to `ocr_edited.json` and `boxes.json` in the project directory and are automatically used by subsequent pipeline steps.
 
-Surya requires PyTorch and will download model weights on first use (~1–2 GB). It is slower than Claude on CPU but produces good results and does not require an API key.
+Surya requires PyTorch and will download model weights on first use (~1–2 GB). It is slower than Tesseract on CPU but produces significantly better results, especially for documents with math or non-English text.
 
 ---
 
-### Combined pipeline
-
-```bash
-python cli.py convert my_document.pdf
-```
-
-This runs all steps in sequence and writes output to `data/my_document/output/`.
-
-### Full pipeline with interactive bounding box review
-
-```bash
-python cli.py convert my_document.pdf --pause-after-analyze
-```
-
-Stops after layout analysis so you can open the bounding box editor, review the detected figure and exclusion zones, then press Enter to continue.
-
 ### Common options
 
-| Option                   | Default        | Description                                   |
-| ------------------------ | -------------- | --------------------------------------------- |
-| `--formats md,html,epub` | `md`           | Output formats                                |
-| `--engine tesseract`     | `claude`       | OCR engine: `claude`, `tesseract`, or `surya` |
-| `--alt-text`             | off            | Generate alt-text for figures                 |
-| `--dpi 300`              | `200`          | Page render resolution                        |
-| `--project-dir /path`    | `data/<stem>/` | Where to store project files                  |
-| `--force`                | off            | Re-run step even if output exists             |
-| `--title "My Book"`      | PDF filename   | Title for HTML/EPUB metadata                  |
-| `--author "J. Smith"`    | —              | Author for EPUB metadata                      |
-| `--self-contained`       | off            | Embed images as base64 in HTML output         |
+| Option                | Applies to       | Default        | Description                                                              |
+| --------------------- | ---------------- | -------------- | ------------------------------------------------------------------------ |
+| `--engine surya`      | `analyze`, `ocr` | `tesseract`    | Engine to use (`surya` or `tesseract` for OCR; `surya` only for analyze) |
+| `--dpi 300`           | `render`         | `200`          | Page render resolution                                                   |
+| `--pages 1,3,5`       | `deskew`         | all            | Limit to specific pages                                                  |
+| `--formats html,epub` | `export`         | `html`         | Output formats                                                           |
+| `--title "My Book"`   | `export`         | PDF filename   | Title for HTML/EPUB metadata                                             |
+| `--author "J. Smith"` | `export`         | —              | Author for EPUB metadata                                                 |
+| `--self-contained`    | `export`         | off            | Embed images as base64 in HTML output                                    |
+| `--project-dir /path` | all              | `data/<stem>/` | Where to store project files                                             |
+| `--force`             | most steps       | off            | Re-run step even if output exists                                        |
 
 ---
 
@@ -221,7 +211,7 @@ python gui/bbox_editor.py data/my_document/
 - **Teal — Table**: table region; cropped, excluded from page OCR, and OCR'd separately
 - **Blue — Exclusion**: boilerplate on this page (headers, footers, page numbers)
 - **Purple — Caption zone**: lines in this zone are tagged as captions in OCR output
-- **Orange — Endnote zone**: lines in this zone are tagged as footnotes in OCR output
+- **Orange — Endnote zone**: lines in this zone are tagged as endnotes in OCR output
 
 ### OCR Line Editor
 

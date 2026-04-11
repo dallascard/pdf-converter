@@ -166,10 +166,17 @@ def _process_page(
     When *paragraph_boxes* is None, vertical gap detection is used for all
     body lines.
 
+    For multi-column layouts the paragraph boxes are used to detect columns;
+    lines are re-sorted into column-major reading order (all of column 1
+    top-to-bottom, then all of column 2, etc.) before processing so that
+    column text is not interleaved in the assembled output.
+
     Each element is tagged with a temporary ``_y`` field (the y coordinate of
     its first line) so that ``build_structure`` can interleave figures at the
     correct position in the flow.  The caller strips ``_y`` before storing.
     """
+    if paragraph_boxes:
+        lines = _sort_lines_reading_order(lines, paragraph_boxes)
     elements: list[dict] = []
     para_lines: list[dict] = []       # accumulate body lines into paragraphs
     caption_lines: list[dict] = []    # accumulate caption lines into one element
@@ -257,6 +264,122 @@ def _process_page(
 
 
 # ---------------------------------------------------------------------------
+# Column-aware reading order
+# ---------------------------------------------------------------------------
+
+def _sort_lines_reading_order(
+    lines: list[dict],
+    paragraph_boxes: list[dict],
+) -> list[dict]:
+    """Re-order lines into column-major reading order using paragraph boxes.
+
+    Surya emits OCR lines sorted by Y, which interleaves two-column text.
+    This function detects distinct columns from the paragraph boxes and
+    re-sorts lines so that all lines in the leftmost column come first
+    (top-to-bottom), then the next column, etc.
+
+    Lines that do not fall within any paragraph box are assigned to a column
+    if their X-centre lies within that column's X span (handles section
+    headings that sit above their paragraph box).  Truly full-width lines
+    (e.g. chapter headings spanning both columns) whose X-centre falls
+    outside all column spans are merged back in at their original Y position.
+    """
+    if not paragraph_boxes or not lines:
+        return lines
+
+    # Assign each line to a paragraph box.
+    box_assignments: list[int | None] = [
+        _find_paragraph_box_idx(line, paragraph_boxes) for line in lines
+    ]
+    matched_boxes = {b for b in box_assignments if b is not None}
+    if not matched_boxes:
+        return lines  # nothing matched — nothing to reorder
+
+    # Cluster matched boxes into columns by X-centre proximity.
+    # Boxes whose X-centres differ by > 0.15 of page width are different columns.
+    def _xcenter(bi: int) -> float:
+        b = paragraph_boxes[bi]
+        return b["x"] + b["w"] / 2
+
+    sorted_box_idxs = sorted(matched_boxes, key=_xcenter)
+    columns: list[list[int]] = [[sorted_box_idxs[0]]]
+    for bi in sorted_box_idxs[1:]:
+        if _xcenter(bi) - _xcenter(columns[-1][-1]) > 0.15:
+            columns.append([bi])
+        else:
+            columns[-1].append(bi)
+
+    # Only reorder when more than one column is detected.
+    if len(columns) < 2:
+        return lines
+
+    # Compute each column's X span from its paragraph boxes.
+    col_spans: list[tuple[float, float]] = []
+    for col in columns:
+        x1 = min(paragraph_boxes[bi]["x"] for bi in col)
+        x2 = max(paragraph_boxes[bi]["x"] + paragraph_boxes[bi]["w"] for bi in col)
+        col_spans.append((x1, x2))
+
+    def _col_for_line(line: dict) -> int | None:
+        """Return column index if line's X-centre falls within a column span."""
+        bbox = line.get("bbox", {})
+        cx = bbox.get("x", 0) + bbox.get("w", 0) / 2
+        for col_idx, (x1, x2) in enumerate(col_spans):
+            if x1 <= cx <= x2:
+                return col_idx
+        return None  # genuinely full-width
+
+    # Final column assignment: paragraph-box match takes priority; otherwise
+    # assign by X span; otherwise None (full-width).
+    box_col: dict[int, int] = {
+        bi: col_idx
+        for col_idx, col in enumerate(columns)
+        for bi in col
+    }
+
+    col_assignments: list[int | None] = []
+    for i, line in enumerate(lines):
+        bi = box_assignments[i]
+        if bi is not None:
+            col_assignments.append(box_col[bi])
+        else:
+            col_assignments.append(_col_for_line(line))
+
+    # Sort key for lines assigned to a column: (col_idx, line_y).
+    # Full-width lines (col None) are interleaved by Y.
+    columnar_idxs = [i for i, c in enumerate(col_assignments) if c is not None]
+    fullwidth_idxs = [i for i, c in enumerate(col_assignments) if c is None]
+
+    columnar_idxs.sort(key=lambda i: (
+        col_assignments[i],
+        lines[i].get("bbox", {}).get("y", 0),
+    ))
+
+    # Merge full-width lines back in at their Y position.
+    fw_by_y = sorted(fullwidth_idxs, key=lambda i: lines[i].get("bbox", {}).get("y", 0))
+    fw_ptr = 0
+    result: list[dict] = []
+
+    for ci in columnar_idxs:
+        col_y = lines[ci].get("bbox", {}).get("y", 0)
+        while fw_ptr < len(fw_by_y):
+            fw_i = fw_by_y[fw_ptr]
+            if lines[fw_i].get("bbox", {}).get("y", 0) <= col_y:
+                result.append(lines[fw_i])
+                fw_ptr += 1
+            else:
+                break
+        result.append(lines[ci])
+
+    # Append any remaining full-width lines.
+    while fw_ptr < len(fw_by_y):
+        result.append(lines[fw_by_y[fw_ptr]])
+        fw_ptr += 1
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Paragraph boundary detection
 # ---------------------------------------------------------------------------
 
@@ -340,7 +463,7 @@ def _join_lines(lines: list[dict]) -> str:
 # Footnote splitting
 # ---------------------------------------------------------------------------
 
-_FOOTNOTE_START = re.compile(r"^(\d+|[*†‡§¶])\s*")
+_FOOTNOTE_START = re.compile(r"^(\d+|[*†‡§¶])[.):]?\s*")
 
 
 def _split_footnotes(footnote_lines: list[dict], page_num: int) -> list[dict]:

@@ -15,14 +15,19 @@ Layout
   │                          │ │  | Col A | Col B |                     ││
   │  Ctrl+scroll to zoom     │ │  |-------|-------|                     ││
   │  Scroll to pan           │ │  | ...   | ...   |                     ││
+  │                          │ ├────────────────────────────────────────┤│
+  │                          │ │  Rendered preview (HTML table)         ││
   │                          │ └────────────────────────────────────────┘│
   └──────────────────────────┴───────────────────────────────────────────┘
 
 Editing
 -------
-The right panel is a plain-text editor with a monospace font — ideal for
-Markdown table syntax.  Changes are flushed into memory when you navigate
-away or save.  Saving writes the entire tables.json back to disk.
+The right panel contains a monospace plain-text editor (top) and a live
+rendered preview of the Markdown table (bottom).  The preview updates as you
+type and shows the table as it will appear in the assembled document.
+
+Changes are flushed into memory when you navigate away or save.  Saving
+writes the entire tables.json back to disk.
 
 When you manually edit content the Format selector is left unchanged so you
 can explicitly mark it "markdown" once the table is correct.
@@ -32,11 +37,14 @@ Keyboard shortcuts
   Ctrl+S           : save all changes to tables.json
   Ctrl+← / Ctrl+→  : previous / next table (only when editor is not focused;
                      inside the editor these keys move to line start/end as normal)
+  Ctrl++ / Ctrl+-  : increase / decrease editor font size
 """
 
 from __future__ import annotations
 
+import html
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -47,12 +55,63 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
-    QSplitter, QStatusBar, QToolBar, QVBoxLayout, QWidget,
+    QSplitter, QStatusBar, QTextBrowser, QToolBar, QVBoxLayout, QWidget,
     QGraphicsScene, QGraphicsView,
 )
 
 
 CONTENT_FORMATS = ["markdown", "preformatted"]
+
+_SEP_ROW = re.compile(r"^\|[\s|:\-]+\|$")
+
+_PREVIEW_CSS = """
+<style>
+body { margin: 6px; font-family: sans-serif; font-size: 13px; }
+table { border-collapse: collapse; }
+th, td { border: 1px solid #aaa; padding: 4px 10px; }
+th { background: #e8e8e8; font-weight: bold; }
+tr:nth-child(even) td { background: #f7f7f7; }
+.no-table { color: #888; font-style: italic; }
+</style>
+"""
+
+
+def _md_table_to_html(md: str) -> str:
+    """Convert a GitHub-flavoured Markdown table string to an HTML snippet.
+
+    Returns an empty string if no table rows are found.
+    """
+    lines = md.strip().splitlines()
+    rows = [l.rstrip() for l in lines if l.strip().startswith("|")]
+    if not rows:
+        return ""
+
+    header_cells: list[str] | None = None
+    body_rows: list[list[str]] = []
+    past_sep = False
+
+    for row in rows:
+        if _SEP_ROW.match(row.strip()):
+            past_sep = True
+            continue
+        cells = [html.escape(c.strip()) for c in row.split("|")[1:-1]]
+        if header_cells is None and not past_sep:
+            header_cells = cells
+        else:
+            body_rows.append(cells)
+
+    parts = ["<table>"]
+    if header_cells:
+        parts.append("<thead><tr>")
+        parts.extend(f"<th>{c}</th>" for c in header_cells)
+        parts.append("</tr></thead>")
+    parts.append("<tbody>")
+    for row_cells in body_rows:
+        parts.append("<tr>")
+        parts.extend(f"<td>{c}</td>" for c in row_cells)
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +270,9 @@ class TableEditorWindow(QMainWindow):
         meta_bar.addWidget(self._format_combo)
         right_layout.addLayout(meta_bar)
 
-        # Monospace plain-text editor
+        # Vertical splitter: monospace editor on top, rendered preview below
+        edit_split = QSplitter(Qt.Orientation.Vertical)
+
         self._editor = QPlainTextEdit()
         mono = QFont("Courier New")
         mono.setPointSize(11)
@@ -227,7 +288,15 @@ class TableEditorWindow(QMainWindow):
             "Set Format to 'markdown' once the table is correct."
         )
         self._editor.textChanged.connect(self._on_text_changed)
-        right_layout.addWidget(self._editor)
+        self._editor.textChanged.connect(self._update_preview)
+        edit_split.addWidget(self._editor)
+
+        self._preview = QTextBrowser()
+        self._preview.setOpenLinks(False)
+        edit_split.addWidget(self._preview)
+        edit_split.setSizes([420, 200])
+
+        right_layout.addWidget(edit_split)
 
         splitter.addWidget(right)
         splitter.setSizes([580, 820])
@@ -240,6 +309,9 @@ class TableEditorWindow(QMainWindow):
         # it only fires when the text editor does NOT have focus — preserving
         # normal cursor-movement behaviour inside the editor.
         QShortcut(QKeySequence("Ctrl+S"), self, self._save_data)
+        QShortcut(QKeySequence("Ctrl+="), self, self._increase_font)
+        QShortcut(QKeySequence("Ctrl++"), self, self._increase_font)
+        QShortcut(QKeySequence("Ctrl+-"), self, self._decrease_font)
 
         # Connections
         self._prev_btn.clicked.connect(self._prev_table)
@@ -293,6 +365,9 @@ class TableEditorWindow(QMainWindow):
         self._format_combo.setCurrentIndex(fmt_idx)
         self._format_combo.blockSignals(False)
 
+        # Refresh rendered preview
+        self._update_preview()
+
     def _show_empty(self):
         self.setWindowTitle(f"Table Editor — {self._proj.name} (no tables)")
         self._nav_label.setText("  No tables  ")
@@ -334,6 +409,33 @@ class TableEditorWindow(QMainWindow):
                 self._next_table()
                 return
         super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # Font size
+    # ------------------------------------------------------------------
+
+    def _increase_font(self):
+        font = self._editor.font()
+        font.setPointSize(min(font.pointSize() + 1, 32))
+        self._editor.setFont(font)
+
+    def _decrease_font(self):
+        font = self._editor.font()
+        font.setPointSize(max(font.pointSize() - 1, 6))
+        self._editor.setFont(font)
+
+    # ------------------------------------------------------------------
+    # Preview
+    # ------------------------------------------------------------------
+
+    def _update_preview(self):
+        text = self._editor.toPlainText()
+        table_html = _md_table_to_html(text)
+        if table_html:
+            body = table_html
+        else:
+            body = "<p class='no-table'>No Markdown table found — edit the content above.</p>"
+        self._preview.setHtml(_PREVIEW_CSS + body)
 
     # ------------------------------------------------------------------
     # Change tracking

@@ -164,21 +164,22 @@ class BoxItem(QGraphicsRectItem):
         return max(8.0, min(self._pw, self._ph) * 0.015)
 
     def _handle_rects(self) -> list[QRectF]:
-        """Return QRectF for each of the four corner handles (item coords)."""
+        """Return QRectF for each of the four corner handles (item coords).
+
+        Handles are placed fully inside the box, with their outer corners
+        flush with the box corners, so the entire handle square is clickable.
+        """
         r = self.rect()
         hs = self._handle_size()
-        corners = [
-            QPointF(r.left(),  r.top()),
-            QPointF(r.right(), r.top()),
-            QPointF(r.left(),  r.bottom()),
-            QPointF(r.right(), r.bottom()),
+        return [
+            QRectF(r.left(),        r.top(),         hs, hs),  # top-left
+            QRectF(r.right() - hs,  r.top(),         hs, hs),  # top-right
+            QRectF(r.left(),        r.bottom() - hs, hs, hs),  # bottom-left
+            QRectF(r.right() - hs,  r.bottom() - hs, hs, hs),  # bottom-right
         ]
-        return [QRectF(c.x() - hs / 2, c.y() - hs / 2, hs, hs) for c in corners]
 
     def boundingRect(self) -> QRectF:
-        """Expand the bounding rect to include the corner handles so Qt clears them."""
-        hs = self._handle_size()
-        return super().boundingRect().adjusted(-hs / 2, -hs / 2, hs / 2, hs / 2)
+        return super().boundingRect()
 
     def paint(self, painter: QPainter, option, widget=None):
         super().paint(painter, option, widget)
@@ -387,36 +388,42 @@ class BoxListPanel(QWidget):
 
         self._fig_group = QGroupBox("Figures (red)")
         self._fig_list = QListWidget()
+        self._fig_list.setMinimumHeight(24)
         fig_layout = QVBoxLayout(self._fig_group)
         fig_layout.addWidget(self._fig_list)
         layout.addWidget(self._fig_group)
 
         self._excl_group = QGroupBox("Exclusions — this page (blue)")
         self._excl_list = QListWidget()
+        self._excl_list.setMinimumHeight(24)
         excl_layout = QVBoxLayout(self._excl_group)
         excl_layout.addWidget(self._excl_list)
         layout.addWidget(self._excl_group)
 
         self._table_group = QGroupBox("Tables (teal)")
         self._table_list = QListWidget()
+        self._table_list.setMinimumHeight(24)
         table_layout = QVBoxLayout(self._table_group)
         table_layout.addWidget(self._table_list)
         layout.addWidget(self._table_group)
 
         self._caption_group = QGroupBox("Caption Zones (purple)")
         self._caption_list = QListWidget()
+        self._caption_list.setMinimumHeight(24)
         caption_layout = QVBoxLayout(self._caption_group)
         caption_layout.addWidget(self._caption_list)
         layout.addWidget(self._caption_group)
 
         self._note_group = QGroupBox("Endnote Zones (orange)")
         self._note_list = QListWidget()
+        self._note_list.setMinimumHeight(24)
         note_layout = QVBoxLayout(self._note_group)
         note_layout.addWidget(self._note_list)
         layout.addWidget(self._note_group)
 
         self._heading_group = QGroupBox("Heading Zones (green)")
         self._heading_list = QListWidget()
+        self._heading_list.setMinimumHeight(24)
         heading_layout = QVBoxLayout(self._heading_group)
         heading_layout.addWidget(self._heading_list)
         layout.addWidget(self._heading_group)

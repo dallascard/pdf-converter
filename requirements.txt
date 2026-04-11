@@ -1,10 +1,14 @@
+# Core dependencies — keep in sync with pyproject.toml
+# Install with: pip install -r requirements.txt
+# Or (recommended): uv sync
+
 # PDF processing
 pdf2image>=1.17.0
 
 # Image processing
 Pillow>=10.0.0
 
-# Claude API
+# Claude API (used for optional alt-text generation)
 anthropic>=0.25.0
 
 # Local OCR fallback
@@ -18,11 +22,15 @@ jinja2>=3.1.0
 # Markdown processing
 markdown>=3.5.0
 
-# GUI
-PyQt6>=6.6.0
+# GUI (pinned <6.8 — PyQt6-Qt6 6.8+ requires glibc 2.39 on aarch64)
+PyQt6>=6.6.0,<6.8
 
 # CLI
 click>=8.1.0
 
 # Utilities
 python-dotenv>=1.0.0
+requests>=2.33.1
+
+# Optional: Surya OCR (recommended; large download ~1-2 GB)
+# pip install surya-ocr "transformers>=4.56.1,<5"
