@@ -56,7 +56,8 @@ from PyQt6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QStatusBar, QToolBar, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QStatusBar, QTextBrowser, QToolBar,
+    QVBoxLayout, QWidget,
 )
 
 # ---------------------------------------------------------------------------
@@ -375,6 +376,122 @@ class PageCanvas(QGraphicsView):
 
 
 # ---------------------------------------------------------------------------
+# HelpDialog
+# ---------------------------------------------------------------------------
+
+_HELP_HTML = """
+<style>
+  body  { font-family: sans-serif; font-size: 13px; margin: 12px; }
+  h2    { margin-top: 0; }
+  h3    { margin: 14px 0 4px 0; }
+  table { border-collapse: collapse; width: 100%; }
+  td    { padding: 6px 8px; vertical-align: top; }
+  .swatch { width: 18px; height: 18px; border-radius: 3px;
+            border: 1px solid #888; display: inline-block; }
+  .name   { font-weight: bold; white-space: nowrap; }
+  kbd   { background: #eee; border: 1px solid #bbb; border-radius: 3px;
+          padding: 1px 5px; font-size: 12px; }
+  hr    { border: none; border-top: 1px solid #ddd; margin: 14px 0; }
+</style>
+
+<h2>Bounding Box Editor — Quick Guide</h2>
+
+<p>Draw boxes over the page image to tell the pipeline what each region
+contains. Select a box type in the toolbar, then drag on the canvas to
+create a box. Drag the box interior to move it; drag a corner handle to
+resize. Right-click a box to delete it.</p>
+
+<h3>Box types</h3>
+<table>
+  <tr>
+    <td><span class="swatch" style="background:#dc3232;"></span></td>
+    <td><span class="name">Figure (red)</span><br>
+        An image region — chart, photograph, diagram, map, etc.<br>
+        The region is <b>cropped</b> to a separate image file and
+        <b>skipped by OCR</b> entirely. Use this for anything that
+        should appear as an embedded image in the output.</td>
+  </tr>
+  <tr>
+    <td><span class="swatch" style="background:#1eb4b4;"></span></td>
+    <td><span class="name">Table (teal)</span><br>
+        A tabular region. The crop is OCR'd separately using a
+        table-aware engine that produces Markdown table syntax.
+        The main OCR pass skips it. Use this for any grid of rows
+        and columns.</td>
+  </tr>
+  <tr>
+    <td><span class="swatch" style="background:#3264dc;"></span></td>
+    <td><span class="name">Exclusion (blue)</span><br>
+        Per-page boilerplate to ignore — running headers, footers,
+        page numbers, watermarks. The region is <b>painted white</b>
+        before OCR so its text never appears in output.<br>
+        <i>Tip: if the same header/footer appears on every page,
+        draw it once and use Apply Global Exclusions to copy it
+        to all pages.</i></td>
+  </tr>
+  <tr>
+    <td><span class="swatch" style="background:#a032dc;"></span></td>
+    <td><span class="name">Caption Zone (purple)</span><br>
+        An area containing figure or table captions. OCR lines
+        inside are tagged as captions and linked to nearby figures
+        in the assembled document. Draw around the caption text
+        only, not the figure itself.</td>
+  </tr>
+  <tr>
+    <td><span class="swatch" style="background:#dc8c32;"></span></td>
+    <td><span class="name">Endnote Zone (orange)</span><br>
+        An area containing footnotes or endnotes (typically at the
+        bottom of the page). OCR lines here are collected and
+        appended as a numbered Notes section at the end of the
+        assembled document.</td>
+  </tr>
+  <tr>
+    <td><span class="swatch" style="background:#32c878;"></span></td>
+    <td><span class="name">Heading Zone (green)</span><br>
+        An area containing headings that the OCR engine would
+        otherwise classify as body text. Lines here are tagged as
+        H1/H2/H3 (set the level by editing boxes.json, default H1).
+        Use this when automatic heading detection misses a section
+        title.</td>
+  </tr>
+</table>
+
+<hr>
+
+<h3>Keyboard shortcuts</h3>
+<table>
+  <tr><td><kbd>← →</kbd></td><td>Previous / next page</td></tr>
+  <tr><td><kbd>Delete</kbd></td><td>Delete selected box</td></tr>
+  <tr><td><kbd>Ctrl+S</kbd></td><td>Save boxes.json</td></tr>
+  <tr><td><kbd>Ctrl+scroll</kbd> / pinch</td><td>Zoom in / out</td></tr>
+  <tr><td>Scroll (no modifier)</td><td>Pan the page</td></tr>
+</table>
+"""
+
+
+class HelpDialog(QDialog):
+    """Non-modal help dialog explaining box types and controls."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Bounding Box Editor — Help")
+        self.resize(540, 620)
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint
+        )
+
+        layout = QVBoxLayout(self)
+        browser = QTextBrowser()
+        browser.setHtml(_HELP_HTML)
+        browser.setOpenLinks(False)
+        layout.addWidget(browser)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+
+# ---------------------------------------------------------------------------
 # BoxListPanel — right-hand sidebar
 # ---------------------------------------------------------------------------
 
@@ -577,12 +694,17 @@ class BBoxEditor(QMainWindow):
         self._next_btn = QPushButton("Next ▶")
         self._page_label = QLabel()
         self._save_btn = QPushButton("💾 Save")
+        self._help_btn = QPushButton("?")
+        self._help_btn.setToolTip("Show help — box types and keyboard shortcuts")
+        self._help_btn.setFixedWidth(28)
 
         toolbar.addWidget(self._prev_btn)
         toolbar.addWidget(self._page_label)
         toolbar.addWidget(self._next_btn)
         toolbar.addSeparator()
         toolbar.addWidget(self._save_btn)
+        toolbar.addSeparator()
+        toolbar.addWidget(self._help_btn)
 
         # Draw-mode buttons (mutually exclusive)
         self._draw_fig_btn      = QPushButton("Draw Figure Box")
@@ -624,10 +746,13 @@ class BBoxEditor(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Right),  self, self._next_page)
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self, self._delete_selected)
 
+        self._help_dialog: HelpDialog | None = None
+
         # Connections
         self._prev_btn.clicked.connect(self._prev_page)
         self._next_btn.clicked.connect(self._next_page)
         self._save_btn.clicked.connect(self._save_data)
+        self._help_btn.clicked.connect(self._show_help)
         self._canvas.box_created.connect(self._on_box_created)
         self._draw_fig_btn.toggled.connect(lambda on: self._set_draw_mode("figure", on))
         self._draw_table_btn.toggled.connect(lambda on: self._set_draw_mode("table", on))
@@ -780,6 +905,13 @@ class BBoxEditor(QMainWindow):
 
     def _hint(self, msg: str):
         self.statusBar().showMessage(msg, 4000)
+
+    def _show_help(self):
+        if self._help_dialog is None:
+            self._help_dialog = HelpDialog(self)
+        self._help_dialog.show()
+        self._help_dialog.raise_()
+        self._help_dialog.activateWindow()
 
 
 # ---------------------------------------------------------------------------

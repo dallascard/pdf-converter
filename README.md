@@ -80,8 +80,6 @@ cp .env.example .env
 
 Each stage can be run independently, which is useful for re-running a single step after manual corrections. Some stages have multiple options.
 
-#### Part 1: Layout analysis:
-
 ```bash
 # 1. Render PDF pages to PNG images
 python cli.py render my_document.pdf
@@ -114,6 +112,9 @@ python cli.py export-boxes my_document.pdf  # writes figures_prompt.json
 # Option B (step 3): save and then import alt-text from claude.ai
 python cli.py import-alt-text my_document.pdf alt_text_response.json
 
+# 6b. Optionally, open the alt-text editor to review and edit figure descriptions
+python gui/alt_text_editor.py data/my_document/
+
 # 7. Run OCR on all pages
 # Option A: Use Surya (better accuracy, handles math and multilingual text; may produce more complex output)
 python cli.py ocr my_document.pdf --engine surya
@@ -129,7 +130,7 @@ python gui/table_editor.py data/my_document/
 # 10. Assemble Markdown (builds document structure and writes output/document.md)
 python cli.py assemble my_document.pdf
 
-#11. Edit the Markdown (in data/<dir>/output/document.md) to correct any remaining issues (ordering, captions, notes, headers, etc.)
+# 11. Edit the Markdown to fix any remaining issues (see "Editing the Markdown" below)
 
 # 12. Export to HTML and/or EPUB
 python cli.py export my_document.pdf --formats html,epub
@@ -138,6 +139,137 @@ python cli.py export my_document.pdf --formats html,epub
 Edits made in the GUI tools are saved to `ocr_edited.json` and `boxes.json` in the project directory and are automatically used by subsequent pipeline steps.
 
 Surya requires PyTorch and will download model weights on first use (~1–2 GB). It is slower than Tesseract on CPU but produces significantly better results, especially for documents with math or non-English text.
+
+---
+
+### Editing the Markdown
+
+After `assemble`, open `output/document.md` in any text editor and work through the items below. Re-run `export` once you are happy with it.
+
+#### Heading levels
+
+Surya and Tesseract sometimes assign the wrong heading level, or miss headings entirely and leave them as body text.
+
+- **Wrong level** — change `##` to `#` (or vice versa) as needed.
+- **Missed heading** — prefix the line with `#`, `##`, or `###`.
+- **Falsely detected heading** — remove the `#` prefix; the line becomes a normal paragraph.
+
+```markdown
+## Introduction ← was ### Introduction; promoted to
+
+# Part II ← was body text; added
+
+This is not a heading. ← was ## This is not a heading.
+```
+
+#### Rejoining split paragraphs
+
+OCR sometimes breaks a single paragraph across two elements when there is a column boundary, a figure interruption, or an unusual line gap. The symptom is two short paragraphs that read as one continuous thought.
+
+Delete the blank line between them (in Markdown, a blank line = paragraph break):
+
+```markdown
+This is the first half of a paragraph that was
+
+split by the OCR engine.
+```
+
+→
+
+```markdown
+This is the first half of a paragraph that was
+split by the OCR engine.
+```
+
+If a word at the join is hyphenated across lines, also remove the hyphen:
+
+```markdown
+...the value-by-area car-
+togram is unique...
+```
+
+→ `...the value-by-area cartogram is unique...`
+
+#### Missing footnote markers in body text
+
+The assembler attempts to detect inline footnote markers (superscript digits) automatically, but may miss some. If a `[^N]` reference is absent from the body text, add it manually at the right word:
+
+```markdown
+spatial transformations[^2] have become popular.
+```
+
+The corresponding endnote `[^2]: …` should already be in the Notes section at the bottom of the file. If the endnote itself is missing, add it there.
+
+#### Figure positioning
+
+Figures are inserted at the Y position where they appear on the page, which does not always match the intended reading position. Move the `<figure>…</figure>` block (or bare `![…](…)` for uncaptioned figures) to where it belongs in the narrative — typically just after the first paragraph that refers to it.
+
+#### Figure caption placement
+
+Captions are linked to their figure by proximity. Occasionally a caption is attached to the wrong figure, or two captions are merged into one. Check each `<figcaption>` block against the source PDF.
+
+- **Wrong figure** — cut the `<figcaption>…</figcaption>` line out of one `<figure>` block and paste it into the correct one.
+- **Merged captions** — split the text at the correct boundary and create a second `<figcaption>` in the appropriate figure block.
+- **Missing caption** — add a `<figcaption>` line inside the `<figure>` block:
+
+```html
+<figure>
+  <img src="../images/fig_3_1.png" alt="A map of rainfall distribution." />
+  <figcaption>Figure 3.1 Mean annual rainfall, 1980–2020.</figcaption>
+</figure>
+```
+
+#### Bold and italic
+
+Use standard Markdown syntax, which exports correctly to `<strong>` and `<em>` in HTML:
+
+```markdown
+**bold text**
+_italic text_
+**_bold and italic_**
+```
+
+Prefer `*asterisks*` over `_underscores_` — underscores inside words (e.g. variable names) can cause unintended italics in some renderers.
+
+Common things to mark up: book or journal titles (_Cartography: Thematic Map Design_), introduced terms (**value-by-area map**), and emphasis that was conveyed by italic type in the original.
+
+#### Footnote text errors
+
+OCR of small footnote text is error-prone. Check the Notes section at the end of the file and correct any garbled words. Also check:
+
+- **Extra period at the start** — the assembler strips `1.` markers but may leave a stray `.` if the OCR inserted a space: `. Author name` → `Author name`.
+- **Run-together footnotes** — if two footnote texts were merged into one `[^N]: …` entry, split them and add the missing `[^M]: …` entry.
+- **Footnote number mismatch** — if a `[^N]` reference in the body has no matching `[^N]: …` at the bottom, either add the missing endnote or renumber to match.
+
+#### Lists and enumerations
+
+Markdown ordered and unordered lists require a blank line before the first item and consistent indentation for nested items. OCR often outputs list items as plain paragraphs. Convert them:
+
+```markdown
+1. First item
+2. Second item
+3. Third item
+
+- Bullet point
+- Another point
+```
+
+Nested lists need four spaces of indentation:
+
+```markdown
+1. Top-level item
+   1. Sub-item
+   2. Sub-item
+```
+
+#### Equations
+
+Surya outputs TeX math inside `<math>` tags, which the exporter converts to MathJax `\(…\)` (inline) or `\[…\]` (display) spans for rendering in HTML. If the TeX is garbled, correct it directly in the Markdown:
+
+- Inline math: `\(E = mc^2\)`
+- Display math: `\[E = mc^2\]`
+
+If Tesseract was used (which has no math support), equations appear as garbled text or are missing entirely. In that case, retype the TeX by hand or leave a placeholder.
 
 ---
 
@@ -212,6 +344,25 @@ python gui/bbox_editor.py data/my_document/
 - **Blue — Exclusion**: boilerplate on this page (headers, footers, page numbers)
 - **Purple — Caption zone**: lines in this zone are tagged as captions in OCR output
 - **Orange — Endnote zone**: lines in this zone are tagged as endnotes in OCR output
+
+### Alt-Text Editor
+
+```bash
+python gui/alt_text_editor.py data/my_document/
+```
+
+Write and review alt-text descriptions for figure crops. Navigate page by page; all figures detected on a page appear as thumbnails in the left panel — click one to view its crop at full size and edit the description in the text field below.
+
+| Action         | How                                         |
+| -------------- | ------------------------------------------- |
+| Navigate pages | Ctrl+← / Ctrl+→ or Prev/Next buttons        |
+| Select figure  | Click thumbnail in left panel               |
+| Edit alt-text  | Type in the text field below the crop image |
+| Zoom image     | Ctrl+scroll or trackpad pinch               |
+| Pan image      | Scroll (no modifier), or drag               |
+| Save           | Ctrl+S or the Save button                   |
+
+A ✓ mark next to a thumbnail indicates that alt-text has already been written for that figure. Changes are written back to `figures.json` and are used by the `export` step to populate `alt` attributes in the HTML output.
 
 ### OCR Line Editor
 
