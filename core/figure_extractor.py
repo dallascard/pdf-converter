@@ -89,6 +89,7 @@ def extract_figures(
         figures              = page_boxes.get("figures", [])
         tables               = page_boxes.get("tables", [])
         per_page_exclusions  = page_boxes.get("exclusions", [])
+        global_exclusions    = boxes.get("global_exclusions", [])
         captions             = page_boxes.get("captions", [])
         notes                = page_boxes.get("notes", [])
 
@@ -129,7 +130,7 @@ def extract_figures(
         # text isn't merged with the main body text by the OCR engine.
         masked = img.copy()
         draw = ImageDraw.Draw(masked)
-        zones_to_mask = figures + tables + per_page_exclusions + captions + notes
+        zones_to_mask = figures + tables + per_page_exclusions + global_exclusions + captions + notes
         for zone in zones_to_mask:
             _paint_box(draw, zone, W, H, colour=config.MASK_COLOUR)
 

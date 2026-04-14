@@ -69,6 +69,7 @@ def analyze_layout(
     raw_pages = _analyze_all_pages_surya(project_dir, page_records)
 
     boxes = {
+        "global_exclusions": [],
         "pages": {
             pn: {
                 "figures": [

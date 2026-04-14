@@ -375,7 +375,7 @@ def init_boxes(pdf_file, project_dir, force):
         click.echo("pages.json not found — run 'render' first for page stubs. "
                    "Writing empty boxes.json anyway.")
 
-    boxes = {"pages": pages}
+    boxes = {"global_exclusions": [], "pages": pages}
     boxes_path.write_text(json.dumps(boxes, indent=2))
     click.echo(f"boxes.json created in {proj}")
     click.echo(f"Open the bounding box editor with:  python gui/bbox_editor.py {proj}")

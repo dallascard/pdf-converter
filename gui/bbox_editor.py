@@ -64,12 +64,13 @@ from PyQt6.QtWidgets import (
 # Colours
 # ---------------------------------------------------------------------------
 
-FIGURE_COLOUR    = QColor(220, 50,  50,  160)   # red
-EXCLUSION_COLOUR = QColor(50,  100, 220, 160)   # blue
-CAPTION_COLOUR   = QColor(160, 50,  220, 160)   # purple
-NOTE_COLOUR      = QColor(220, 140, 50,  160)   # orange
-TABLE_COLOUR     = QColor(30,  180, 180, 160)   # teal
-HEADING_COLOUR   = QColor(50,  200, 120, 160)   # green
+FIGURE_COLOUR           = QColor(220, 50,  50,  160)   # red
+EXCLUSION_COLOUR        = QColor(50,  100, 220, 160)   # blue
+GLOBAL_EXCLUSION_COLOUR = QColor(30,  160, 255, 160)   # sky blue
+CAPTION_COLOUR          = QColor(160, 50,  220, 160)   # purple
+NOTE_COLOUR             = QColor(220, 140, 50,  160)   # orange
+TABLE_COLOUR            = QColor(30,  180, 180, 160)   # teal
+HEADING_COLOUR          = QColor(50,  200, 120, 160)   # green
 HANDLE_SCREEN_PX = 10   # target handle size in screen pixels
 MIN_BOX_PX       = 5    # minimum box size (pixels at 1× zoom)
 
@@ -114,15 +115,19 @@ class BoxItem(QGraphicsRectItem):
         self.setAcceptHoverEvents(True)
 
         colour = {
-            "figure":        FIGURE_COLOUR,
-            "exclusion":     EXCLUSION_COLOUR,
-            "caption_zone":  CAPTION_COLOUR,
-            "note_zone":     NOTE_COLOUR,
-            "table":         TABLE_COLOUR,
-            "heading_zone":  HEADING_COLOUR,
+            "figure":           FIGURE_COLOUR,
+            "exclusion":        EXCLUSION_COLOUR,
+            "global_exclusion": GLOBAL_EXCLUSION_COLOUR,
+            "caption_zone":     CAPTION_COLOUR,
+            "note_zone":        NOTE_COLOUR,
+            "table":            TABLE_COLOUR,
+            "heading_zone":     HEADING_COLOUR,
         }.get(box_type, FIGURE_COLOUR)
 
-        self.setPen(QPen(colour.darker(140), 2))
+        pen = QPen(colour.darker(140), 2)
+        if box_type == "global_exclusion":
+            pen.setStyle(Qt.PenStyle.DashLine)
+        self.setPen(pen)
         self.setBrush(QBrush(colour))
         self._sync_rect_from_data()
 
@@ -336,11 +341,12 @@ class PageCanvas(QGraphicsView):
                 self._draw_start = pos
                 self._draw_rect_item = QGraphicsRectItem()
                 colour = {
-                    "figure":       FIGURE_COLOUR,
-                    "table":        TABLE_COLOUR,
-                    "caption_zone": CAPTION_COLOUR,
-                    "note_zone":    NOTE_COLOUR,
-                    "heading_zone": HEADING_COLOUR,
+                    "figure":           FIGURE_COLOUR,
+                    "table":            TABLE_COLOUR,
+                    "caption_zone":     CAPTION_COLOUR,
+                    "note_zone":        NOTE_COLOUR,
+                    "heading_zone":     HEADING_COLOUR,
+                    "global_exclusion": GLOBAL_EXCLUSION_COLOUR,
                 }.get(self._new_box_type, EXCLUSION_COLOUR)
                 self._draw_rect_item.setPen(QPen(colour.darker(140), 2, Qt.PenStyle.DashLine))
                 self._draw_rect_item.setBrush(QBrush(colour))
@@ -424,10 +430,16 @@ resize. Right-click a box to delete it.</p>
     <td><span class="name">Exclusion (blue)</span><br>
         Per-page boilerplate to ignore — running headers, footers,
         page numbers, watermarks. The region is <b>painted white</b>
-        before OCR so its text never appears in output.<br>
-        <i>Tip: if the same header/footer appears on every page,
-        draw it once and use Apply Global Exclusions to copy it
-        to all pages.</i></td>
+        before OCR so its text never appears in output.</td>
+  </tr>
+  <tr>
+    <td><span class="swatch" style="background:#1ea0ff;"></span></td>
+    <td><span class="name">Global Exclusion (sky blue, dashed)</span><br>
+        Like an Exclusion, but applied to <b>every page</b>.
+        Draw one anywhere, and it appears on all pages automatically.
+        Moving or resizing it on any page updates it everywhere.
+        Use this for recurring boilerplate such as a running header
+        or footer that occupies the same position on every page.</td>
   </tr>
   <tr>
     <td><span class="swatch" style="background:#a032dc;"></span></td>
@@ -510,6 +522,13 @@ class BoxListPanel(QWidget):
         fig_layout.addWidget(self._fig_list)
         layout.addWidget(self._fig_group)
 
+        self._global_excl_group = QGroupBox("Global Exclusions — all pages (sky blue)")
+        self._global_excl_list = QListWidget()
+        self._global_excl_list.setMinimumHeight(24)
+        global_excl_layout = QVBoxLayout(self._global_excl_group)
+        global_excl_layout.addWidget(self._global_excl_list)
+        layout.addWidget(self._global_excl_group)
+
         self._excl_group = QGroupBox("Exclusions — this page (blue)")
         self._excl_list = QListWidget()
         self._excl_list.setMinimumHeight(24)
@@ -561,10 +580,15 @@ class BoxListPanel(QWidget):
         notes: list[dict] = (),
         tables: list[dict] = (),
         headings: list[dict] = (),
+        global_exclusions: list[dict] = (),
     ):
         self._fig_list.clear()
         for fig in figures:
             self._fig_list.addItem(fig.get("id", "figure"))
+
+        self._global_excl_list.clear()
+        for ex in global_exclusions:
+            self._global_excl_list.addItem(ex.get("label", ex.get("id", "global_exclusion")))
 
         self._excl_list.clear()
         for ex in exclusions:
@@ -622,6 +646,9 @@ class BBoxEditor(QMainWindow):
         self._page_records = json.loads(pages_path.read_text())
         self._boxes = json.loads(boxes_path.read_text())
 
+        # Ensure top-level keys exist (migration safety for old boxes.json files)
+        self._boxes.setdefault("global_exclusions", [])
+
         # Ensure pages dict exists with all keys
         for rec in self._page_records:
             pn = str(rec["page_number"])
@@ -669,12 +696,35 @@ class BBoxEditor(QMainWindow):
             page_data.get("notes", []),
             page_data.get("tables", []),
             page_data.get("headings", []),
+            global_exclusions=self._boxes.get("global_exclusions", []),
+        )
+
+    def _delete_global_box_item(self, item: BoxItem):
+        self._boxes["global_exclusions"] = [
+            b for b in self._boxes["global_exclusions"] if b is not item._data
+        ]
+        self._canvas._scene.removeItem(item)
+        if item in self._box_items:
+            self._box_items.remove(item)
+        page_str = str(self._page_records[self._current_page_idx]["page_number"])
+        page_data = self._boxes["pages"].get(page_str, {})
+        self._panel.refresh(
+            page_data.get("figures", []),
+            page_data.get("exclusions", []),
+            page_data.get("captions", []),
+            page_data.get("notes", []),
+            page_data.get("tables", []),
+            page_data.get("headings", []),
+            global_exclusions=self._boxes.get("global_exclusions", []),
         )
 
     def _delete_selected(self):
         for item in list(self._canvas._scene.selectedItems()):
             if isinstance(item, BoxItem):
-                self._delete_box_item(item)
+                if item._type == "global_exclusion":
+                    self._delete_global_box_item(item)
+                else:
+                    self._delete_box_item(item)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -707,20 +757,23 @@ class BBoxEditor(QMainWindow):
         toolbar.addWidget(self._help_btn)
 
         # Draw-mode buttons (mutually exclusive)
-        self._draw_fig_btn      = QPushButton("Draw Figure Box")
-        self._draw_table_btn    = QPushButton("Draw Table Box")
-        self._draw_excl_btn     = QPushButton("Draw Exclusion Box")
-        self._draw_caption_btn  = QPushButton("Draw Caption Zone")
-        self._draw_note_btn     = QPushButton("Draw Endnote Zone")
-        self._draw_heading_btn  = QPushButton("Draw Heading Zone")
+        self._draw_fig_btn         = QPushButton("Draw Figure Box")
+        self._draw_table_btn       = QPushButton("Draw Table Box")
+        self._draw_excl_btn        = QPushButton("Draw Exclusion Box")
+        self._draw_global_excl_btn = QPushButton("Draw Global Exclusion")
+        self._draw_caption_btn     = QPushButton("Draw Caption Zone")
+        self._draw_note_btn        = QPushButton("Draw Endnote Zone")
+        self._draw_heading_btn     = QPushButton("Draw Heading Zone")
         for btn in (self._draw_fig_btn, self._draw_table_btn, self._draw_excl_btn,
-                    self._draw_caption_btn, self._draw_note_btn, self._draw_heading_btn):
+                    self._draw_global_excl_btn, self._draw_caption_btn,
+                    self._draw_note_btn, self._draw_heading_btn):
             btn.setCheckable(True)
         self._draw_fig_btn.setChecked(True)
         toolbar.addSeparator()
         toolbar.addWidget(self._draw_fig_btn)
         toolbar.addWidget(self._draw_table_btn)
         toolbar.addWidget(self._draw_excl_btn)
+        toolbar.addWidget(self._draw_global_excl_btn)
         toolbar.addWidget(self._draw_caption_btn)
         toolbar.addWidget(self._draw_note_btn)
         toolbar.addWidget(self._draw_heading_btn)
@@ -757,6 +810,7 @@ class BBoxEditor(QMainWindow):
         self._draw_fig_btn.toggled.connect(lambda on: self._set_draw_mode("figure", on))
         self._draw_table_btn.toggled.connect(lambda on: self._set_draw_mode("table", on))
         self._draw_excl_btn.toggled.connect(lambda on: self._set_draw_mode("exclusion", on))
+        self._draw_global_excl_btn.toggled.connect(lambda on: self._set_draw_mode("global_exclusion", on))
         self._draw_caption_btn.toggled.connect(lambda on: self._set_draw_mode("caption_zone", on))
         self._draw_note_btn.toggled.connect(lambda on: self._set_draw_mode("note_zone", on))
         self._draw_heading_btn.toggled.connect(lambda on: self._set_draw_mode("heading_zone", on))
@@ -811,7 +865,14 @@ class BBoxEditor(QMainWindow):
             item = self._canvas.add_box_item(hdg, "heading_zone", on_delete=self._delete_box_item)
             self._box_items.append(item)
 
-        self._panel.refresh(figures, exclusions, captions, notes, tables, headings)
+        global_exclusions = self._boxes.get("global_exclusions", [])
+        for gex in global_exclusions:
+            item = self._canvas.add_box_item(gex, "global_exclusion",
+                                             on_delete=self._delete_global_box_item)
+            self._box_items.append(item)
+
+        self._panel.refresh(figures, exclusions, captions, notes, tables, headings,
+                            global_exclusions=global_exclusions)
         self._page_label.setText(f"  Page {page_num} / {len(self._page_records)}  ")
         self._prev_btn.setEnabled(idx > 0)
         self._next_btn.setEnabled(idx < len(self._page_records) - 1)
@@ -845,6 +906,25 @@ class BBoxEditor(QMainWindow):
         page_boxes = self._boxes["pages"].setdefault(page_str, {})
         for key in ("figures", "tables", "exclusions", "captions", "notes", "headings"):
             page_boxes.setdefault(key, [])
+
+        if box_type == "global_exclusion":
+            global_excls = self._boxes.setdefault("global_exclusions", [])
+            new_box["id"] = f"global_{len(global_excls) + 1}"
+            new_box["label"] = "global_exclusion"
+            global_excls.append(new_box)
+            item = self._canvas.add_box_item(new_box, "global_exclusion",
+                                             on_delete=self._delete_global_box_item)
+            self._box_items.append(item)
+            self._panel.refresh(
+                page_boxes.get("figures", []),
+                page_boxes.get("exclusions", []),
+                page_boxes.get("captions", []),
+                page_boxes.get("notes", []),
+                page_boxes.get("tables", []),
+                page_boxes.get("headings", []),
+                global_exclusions=global_excls,
+            )
+            return
 
         if box_type == "figure":
             idx = len(page_boxes["figures"])
@@ -881,18 +961,20 @@ class BBoxEditor(QMainWindow):
             page_boxes["notes"],
             page_boxes["tables"],
             page_boxes["headings"],
+            global_exclusions=self._boxes.get("global_exclusions", []),
         )
 
     def _set_draw_mode(self, mode: str, checked: bool):
         if not checked:
             return
         mode_map = {
-            "figure":       self._draw_fig_btn,
-            "table":        self._draw_table_btn,
-            "exclusion":    self._draw_excl_btn,
-            "caption_zone": self._draw_caption_btn,
-            "note_zone":    self._draw_note_btn,
-            "heading_zone": self._draw_heading_btn,
+            "figure":           self._draw_fig_btn,
+            "table":            self._draw_table_btn,
+            "exclusion":        self._draw_excl_btn,
+            "global_exclusion": self._draw_global_excl_btn,
+            "caption_zone":     self._draw_caption_btn,
+            "note_zone":        self._draw_note_btn,
+            "heading_zone":     self._draw_heading_btn,
         }
         for m, btn in mode_map.items():
             if m != mode:
