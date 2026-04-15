@@ -1,6 +1,6 @@
 # pdf-converter
 
-Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive pipeline built around Surya (or tesseract) and Claude. Handles figures, tables, captions, footnotes/endnotes, headings, alt-text, and exclusion zones.
+Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive pipeline built around Surya (or tesseract) and Claude. Handles figures, tables, captions, footnotes/endnotes, headings, alt-text, and exclusion zones, and emphasizes human verification / correction after each stage (layout detection, OCR, alt-text creation, and assembly into Markdown).
 
 ## Features
 
@@ -216,9 +216,9 @@ Use standard Markdown syntax, which exports correctly to `<strong>` and `<em>` i
 
 ```markdown
 **bold text**
-*italic text*
-*alternate italics*
-***bold and italic***
+_italic text_
+_alternate italics_
+**_bold and italic_**
 ```
 
 Prefer `*asterisks*` over `_underscores_` — underscores inside words (e.g. variable names) can cause unintended italics in some renderers.
