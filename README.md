@@ -19,18 +19,18 @@ Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive p
 
 ## Workflow
 
-This system uses an interactive, multi-step, pipeline approach, emphasizing the need for human oversight at each stage. The basic workflow is:
+This system uses an interactive, multi-step, pipeline approach, emphasizing the need for human oversight at each stage. The basic workflow of is:
 
-1. Split PDF into individual pages (render).
-2. Run the layout analysis to automatically identify figures, tables, headings, captions, notes, and exclusion zones (using Surya by default).
-3. Manually edit the bounding boxes for each region (e.g., figure) using the provided GUI.
-4. Extract the figures using the edited bounding boxes
+1. Automatically wplit PDF into individual pages (render).
+2. Run the layout analysis to identify figures, tables, headings, captions, notes, and exclusion zones (using Surya by default).
+3. Manually check/edit the bounding boxes for each region (e.g., figure) using the provided GUI.
+4. Extract the figures using the edited bounding boxes.
 5. Optionally, get alt-text for each figure using Claude (API or web interface), and edit it using the GUI provided.
-6. Run the OCR (using Surya by default)
-7. Optionally, check/edit the OCR and/or extracted tables using the GUIs provided
-8. Automatically assemble everything into a Markdown document
+6. Run the OCR (using Surya by default).
+7. Optionally, check/edit the OCR and/or extracted tables using the GUIs provided.
+8. Automatically assemble everything into a Markdown document.
 9. Edit the resulting file using any Markdown editor (e.g. Macdown), to manually correct small errors in things like heading levels, caption placement, endnote positions, and paragraph breaks.
-10. Export the final document to HTML or EPUB
+10. Export the final document to HTML or EPUB.
 
 Note that scripts are set to not overwrite by default. If re-running a script, add the `--force` option on the command line to overwrite.
 
