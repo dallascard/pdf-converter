@@ -14,6 +14,7 @@ Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive p
 - **Multi-format export** — output to `.md`, `.html`, and `.epub`; `--self-contained` embeds images as base64 for a single shareable HTML file
 - **Bounding Box Editor** — PyQt6 GUI to review and correct auto-detected figure, table, and exclusion zones
 - **OCR Line Editor** — PyQt6 GUI for line-by-line OCR correction, with each line's image crop shown alongside its text field
+- **OCR Table Editor** — PyQt6 GUI for table-by-table OCR correction, with each table's image crop shown alongside its Markdown table
 - **Alt-text Editor** — PyQt6 GUI for editing alt-text for each figure, shown in context.
 - **Optional skew correction** — Automatically correct individual pages for slight rotation due to the scanning process.
 
