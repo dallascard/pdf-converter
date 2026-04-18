@@ -133,6 +133,9 @@ _HTML_TEMPLATE = """\
     h2 {{ font-size: 1.45rem; margin-top: 2rem; }}
     h3 {{ font-size: 1.2rem;  margin-top: 1.5rem; }}
     img {{ max-width: 100%; height: auto; display: block; margin: 1.5rem auto; }}
+    figure {{ margin: 1.5rem 0; text-align: center; }}
+    figcaption {{ font-size: 0.9rem; color: #555; font-style: italic; margin-top: 0.5rem; }}
+    figure table {{ margin: 0 auto; text-align: left; }}
     em  {{ display: block; text-align: center; font-size: 0.9rem; color: #555; }}
     hr  {{ border: none; border-top: 1px solid #ccc; margin: 2.5rem 0; }}
     .footnotes {{ font-size: 0.9rem; color: #444; }}
@@ -404,6 +407,8 @@ def _wrap_epub_chapter(title: str, body_html: str) -> str:
         "<style>"
         "body{font-family:serif;font-size:1em;line-height:1.6;margin:1em;}"
         "img{max-width:100%;height:auto;}"
+        "figure{margin:1.5em 0;text-align:center;}"
+        "figcaption{font-size:0.9em;color:#555;font-style:italic;margin-top:0.4em;}"
         "em{display:block;text-align:center;font-size:0.9em;}"
         "</style>"
         "</head>"

@@ -154,8 +154,8 @@ def _render_markdown(elements: list[dict], project_dir: Path) -> str:
     endnotes: list[dict] = []            # collected footnotes → endnotes
     endnote_counter = 0                  # fallback counter for non-numeric markers
     pending_footnotes: list[dict] = []   # footnotes since last paragraph
-    pending_figure: dict | None = None   # figure element buffered until caption decision
-    pending_captions: list[str] = []     # caption texts accumulated for pending_figure
+    pending_el: dict | None = None       # figure/table element buffered until caption decision
+    pending_captions: list[str] = []     # caption texts accumulated for pending_el
 
     # Pre-collect the set of numeric footnote markers present in this document.
     # Used to constrain inline marker detection to digits that actually correspond
@@ -163,7 +163,7 @@ def _render_markdown(elements: list[dict], project_dir: Path) -> str:
     known_markers: set[str] = {
         el["marker"]
         for el in elements
-        if el.get("kind") == "footnote" and el.get("marker", "").isdigit()
+        if el.get("kind") == "footnote" and (el.get("marker") or "").isdigit()
     }
 
     def _endnote_number(fn: dict) -> str | int:
@@ -174,50 +174,82 @@ def _render_markdown(elements: list[dict], project_dir: Path) -> str:
         fall back to a sequential counter.
         """
         nonlocal endnote_counter
-        marker = fn.get("marker", "")
+        marker = fn.get("marker") or ""
         if marker.isdigit():
             return int(marker)
         endnote_counter += 1
         return endnote_counter
 
-    def _flush_figure() -> None:
-        """Emit the buffered figure element, with or without caption."""
-        nonlocal pending_figure
-        if pending_figure is None:
+    def _flush_pending_el() -> None:
+        """Emit the buffered figure or table element, with or without caption."""
+        nonlocal pending_el
+        if pending_el is None:
             return
-        alt = pending_figure.get("alt_text", "") or ""
-        crop = pending_figure.get("crop_path", "")
-        rel = f"../{crop}" if crop else ""
-        if pending_captions:
-            cap_text = " ".join(pending_captions)
-            lines.append(
-                f"\n<figure>\n"
-                f'<img src="{_html.escape(rel, quote=True)}"'
-                f' alt="{_html.escape(alt, quote=True)}">\n'
-                f"<figcaption>{_html.escape(cap_text)}</figcaption>\n"
-                f"</figure>"
-            )
-        else:
-            lines.append(
-                f"\n<figure>\n"
-                f'<img src="{_html.escape(rel, quote=True)}"'
-                f' alt="{_html.escape(alt, quote=True)}">\n'
-                f"</figure>"
-            )
-        pending_figure = None
+        kind = pending_el.get("kind")
+        if kind == "figure":
+            alt = pending_el.get("alt_text", "") or ""
+            crop = pending_el.get("crop_path", "")
+            rel = f"../{crop}" if crop else ""
+            if pending_captions:
+                cap_text = " ".join(pending_captions)
+                lines.append(
+                    f"\n<figure>\n"
+                    f'<img src="{_html.escape(rel, quote=True)}"'
+                    f' alt="{_html.escape(alt, quote=True)}">\n'
+                    f"<figcaption>{_html.escape(cap_text)}</figcaption>\n"
+                    f"</figure>"
+                )
+            else:
+                lines.append(
+                    f"\n<figure>\n"
+                    f'<img src="{_html.escape(rel, quote=True)}"'
+                    f' alt="{_html.escape(alt, quote=True)}">\n'
+                    f"</figure>"
+                )
+        elif kind == "table":
+            content = pending_el.get("content", "").strip()
+            if pending_captions:
+                cap_text = " ".join(pending_captions)
+                if content:
+                    if pending_el.get("content_format") == "markdown":
+                        table_body = content
+                    else:
+                        table_body = f"```\n{content}\n```"
+                else:
+                    crop = pending_el.get("crop_path", "")
+                    rel = f"../{crop}" if crop else ""
+                    table_body = f"![Table]({rel})"
+                lines.append(
+                    f'\n<figure markdown="1">\n\n'
+                    f"{table_body}\n\n"
+                    f"<figcaption>{_html.escape(cap_text)}</figcaption>\n"
+                    f"</figure>"
+                )
+            else:
+                # No caption — render table directly
+                if content:
+                    if pending_el.get("content_format") == "markdown":
+                        lines.append(f"\n{content}")
+                    else:
+                        lines.append(f"\n```\n{content}\n```")
+                else:
+                    crop = pending_el.get("crop_path", "")
+                    rel = f"../{crop}" if crop else ""
+                    lines.append(f"\n![Table]({rel})")
+        pending_el = None
         pending_captions.clear()
 
     for el in elements:
         kind = el.get("kind")
 
         if kind == "heading":
-            _flush_figure()
+            _flush_pending_el()
             _flush_pending_footnotes(lines, endnotes, pending_footnotes, _endnote_number)
             prefix = "#" * el.get("level", 1)
             lines.append(f"\n{prefix} {el['text'].strip()}\n")
 
         elif kind == "paragraph":
-            _flush_figure()
+            _flush_pending_el()
             text = el.get("text", "").strip()
             if text:
                 # Try to detect and mark up inline footnote markers.
@@ -247,35 +279,24 @@ def _render_markdown(elements: list[dict], project_dir: Path) -> str:
                 pending_footnotes.clear()
 
         elif kind == "figure":
-            _flush_figure()
+            _flush_pending_el()
             _flush_pending_footnotes(lines, endnotes, pending_footnotes, _endnote_number)
-            pending_figure = el   # buffer; emit once we know if a caption follows
+            pending_el = el   # buffer; emit once we know if a caption follows
 
         elif kind == "table":
-            _flush_figure()
+            _flush_pending_el()
             _flush_pending_footnotes(lines, endnotes, pending_footnotes, _endnote_number)
-            content = el.get("content", "").strip()
-            if content:
-                if el.get("content_format") == "markdown":
-                    lines.append(f"\n{content}")
-                else:
-                    # Preformatted (Tesseract plain text) — render as code block
-                    lines.append(f"\n```\n{content}\n```")
-            else:
-                # No OCR content yet — fall back to image link
-                crop = el.get("crop_path", "")
-                rel = f"../{crop}" if crop else ""
-                lines.append(f"\n![Table]({rel})")
+            pending_el = el   # buffer; emit once we know if a caption follows
 
         elif kind == "caption":
             text = el.get("text", "").strip()
             if text:
-                if pending_figure is not None:
-                    # Accumulate for the buffered figure; _flush_figure() will
-                    # emit the <figure>/<figcaption> block.
+                if pending_el is not None:
+                    # Accumulate for the buffered figure/table; _flush_pending_el()
+                    # will emit the <figure>/<figcaption> block.
                     pending_captions.append(text)
                 else:
-                    # Orphaned caption (no preceding figure) — render as italic.
+                    # Orphaned caption (no preceding figure/table) — render as italic.
                     lines.append(f"\n*{text}*")
 
         elif kind == "footnote":
@@ -283,13 +304,13 @@ def _render_markdown(elements: list[dict], project_dir: Path) -> str:
             pending_footnotes.append(dict(el))
 
         else:
-            _flush_figure()
+            _flush_pending_el()
             text = el.get("text", "").strip()
             if text:
                 lines.append(f"\n{text}")
 
     # Flush anything still buffered at end of document
-    _flush_figure()
+    _flush_pending_el()
     _flush_pending_footnotes(lines, endnotes, pending_footnotes, _endnote_number)
 
     # Append endnotes section, sorted by endnote number

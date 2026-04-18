@@ -10,6 +10,7 @@ Usage examples
   python cli.py analyze          my_document.pdf   # Surya layout detection
   python gui/bbox_editor.py      data/my_document/ # review/edit boxes
   python cli.py extract          my_document.pdf
+  python cli.py compress-figures my_document.pdf   # optional: shrink crops for export
   python cli.py get-alt-text     my_document.pdf   # optional: Claude API auto
   python cli.py export-boxes     my_document.pdf   # optional: export for claude.ai
   python cli.py import-alt-text  my_document.pdf alt_text_response.json
@@ -32,6 +33,7 @@ Step descriptions
   init-boxes       Create empty boxes.json for fully manual annotation
   import-boxes     Import boxes.json produced via claude.ai
   extract          Crop figures/tables, produce masked page images for OCR
+  compress-figures Compress extracted figure/table crops to JPEG (optional; shrinks exports)
   get-alt-text     Generate alt-text for figures via Claude API
   export-boxes     Export figure list for manual alt-text via claude.ai
   import-alt-text  Import alt-text response from claude.ai into figures.json
@@ -52,6 +54,7 @@ import click
 import config
 from core.pdf_renderer import render_pdf
 from core.deskewer import deskew_pages
+from core.image_compressor import compress_figures
 from core.alt_text import run_alt_text, export_alt_text_prompt, import_alt_text_response
 from core.layout_analyzer import analyze_layout
 from core.figure_extractor import extract_figures, load_tables
@@ -144,9 +147,9 @@ def render(pdf_file, project_dir, force, dpi):
 @_force_option
 @click.option("--pages", default=None,
               help="Comma-separated 1-based page numbers to deskew (default: all).")
-@click.option("--max-angle", "max_angle", default=10.0, show_default=True,
+@click.option("--max-angle", "max_angle", default=7.5, show_default=True,
               help="Maximum skew angle to search (degrees).")
-@click.option("--step", default=0.5, show_default=True,
+@click.option("--step", default=0.25, show_default=True,
               help="Angle search step size (degrees). Smaller = more precise but slower.")
 def deskew(pdf_file, project_dir, force, pages, max_angle, step):
     """Detect and correct rotational skew in rendered page images.
@@ -174,6 +177,38 @@ def deskew(pdf_file, project_dir, force, pages, max_angle, step):
         click.echo(f"Deskewed {len(processed)} page(s): {angles}")
     else:
         click.echo("No pages deskewed (all already processed or filtered out).")
+
+
+# ---------------------------------------------------------------------------
+# compress
+# ---------------------------------------------------------------------------
+
+@cli.command("compress-figures")
+@_pdf_argument
+@_project_dir_option
+@_force_option
+@click.option("--max-bytes", "max_bytes", default=config.COMPRESS_MAX_BYTES,
+              show_default=True,
+              help="File-size threshold in bytes; crops over this are converted to JPEG.")
+@click.option("--quality", "jpeg_quality", default=config.COMPRESS_JPEG_QUALITY,
+              show_default=True,
+              help="JPEG quality (1–95) used when compressing.")
+def compress_figures_cmd(pdf_file, project_dir, force, max_bytes, jpeg_quality):
+    """Compress oversized figure and table crop images to JPEG.
+
+    Page images are NOT touched (preserves OCR quality).  Only the extracted
+    crops in images/ are compressed, making HTML/EPUB exports smaller.
+    figures.json and tables.json are updated with any new .jpg paths.
+
+    Note: the alt-text step already compresses page images in-memory before
+    sending them to the Claude API, so this step is not required for alt-text.
+    """
+    proj = _resolve_project_dir(pdf_file, project_dir)
+    summary = compress_figures(proj, max_bytes=max_bytes,
+                               jpeg_quality=jpeg_quality, force=force)
+    n_fig = sum(1 for r in summary["figures"] if r.get("action") not in ("ok", "missing"))
+    n_tbl = sum(1 for r in summary["tables"]  if r.get("action") not in ("ok", "missing"))
+    click.echo(f"Compressed {n_fig} figure crop(s) and {n_tbl} table crop(s).")
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +544,9 @@ def assemble(pdf_file, project_dir, force):
 @click.option("--author", default="", help="Author name for EPUB metadata.")
 @click.option("--self-contained", "self_contained", is_flag=True, default=False,
               help="Embed images as base64 in HTML for a single shareable file.")
-def export_cmd(pdf_file, project_dir, formats, title, author, self_contained):
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite existing output files.")
+def export_cmd(pdf_file, project_dir, formats, title, author, self_contained, force):
     """Export Markdown to HTML and/or EPUB."""
     proj = _resolve_project_dir(pdf_file, project_dir)
     md_path = proj / "output" / "document.md"
@@ -519,6 +556,18 @@ def export_cmd(pdf_file, project_dir, formats, title, author, self_contained):
 
     fmt_list = [f.strip() for f in formats.split(",") if f.strip()]
     doc_title = title or Path(pdf_file).stem.replace("_", " ").title()
+
+    output_dir = proj / "output"
+    if not force:
+        existing = [f for f in fmt_list
+                    if (output_dir / f"document.{f}").exists()]
+        if existing:
+            click.echo(
+                f"Output already exists: {', '.join(f'document.{f}' for f in existing)}. "
+                "Use --force to overwrite.",
+                err=True,
+            )
+            sys.exit(1)
 
     results = export(proj, md_path, fmt_list, title=doc_title, author=author,
                      self_contained=self_contained)

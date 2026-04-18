@@ -33,6 +33,24 @@ RENDER_DPI: int = int(os.getenv("RENDER_DPI", "200"))
 RENDER_FORMAT: str = os.getenv("RENDER_FORMAT", "PNG")
 
 # ---------------------------------------------------------------------------
+# Image compression
+# ---------------------------------------------------------------------------
+# Figure/table crops larger than this (bytes) are converted to JPEG by the
+# optional 'compress-figures' step.  Also used as the in-memory threshold in
+# alt_text.py before sending page images to the Claude API (5 MB hard limit).
+COMPRESS_MAX_BYTES: int = int(os.getenv("COMPRESS_MAX_BYTES", str(4_500_000)))
+
+# JPEG quality used when compressing oversized images.  85 is visually
+# lossless for scanned documents and typically reduces file size 5–10×.
+COMPRESS_JPEG_QUALITY: int = int(os.getenv("COMPRESS_JPEG_QUALITY", "85"))
+
+# Maximum pixel length on the longest side for in-memory compression used
+# before Claude API calls.  Some PDFs render to very large pixel dimensions
+# regardless of RENDER_DPI (e.g. documents using a non-standard UserUnit).
+# 2048 is more than enough for Claude Vision to read figures and captions.
+COMPRESS_MAX_DIM: int = int(os.getenv("COMPRESS_MAX_DIM", "2048"))
+
+# ---------------------------------------------------------------------------
 # Layout analysis
 # ---------------------------------------------------------------------------
 # Minimum fraction of page area for a region to be considered a figure.

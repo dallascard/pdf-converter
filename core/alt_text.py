@@ -216,7 +216,13 @@ def _call_claude(
     The prompt tells Claude where the figure is (as % coordinates) and where
     any caption zones are, so it can read surrounding context.
     """
-    img_b64 = base64.standard_b64encode(page_path.read_bytes()).decode()
+    from core.image_compressor import compress_image_bytes
+    raw = page_path.read_bytes()
+    img_data, media_type = compress_image_bytes(raw)
+    if len(img_data) < len(raw):
+        logger.info("    Page image compressed in-memory for API call (%s → %s).",
+                    f"{len(raw) / 1e6:.1f} MB", f"{len(img_data) / 1e6:.1f} MB")
+    img_b64 = base64.standard_b64encode(img_data).decode()
 
     location_desc = f"The figure is located at: {_format_box(fig_box)}."
 
@@ -253,7 +259,7 @@ def _call_claude(
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/png",
+                            "media_type": media_type,
                             "data": img_b64,
                         },
                     },

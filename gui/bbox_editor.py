@@ -757,13 +757,13 @@ class BBoxEditor(QMainWindow):
         toolbar.addWidget(self._help_btn)
 
         # Draw-mode buttons (mutually exclusive)
-        self._draw_fig_btn         = QPushButton("Draw Figure Box")
-        self._draw_table_btn       = QPushButton("Draw Table Box")
-        self._draw_excl_btn        = QPushButton("Draw Exclusion Box")
-        self._draw_global_excl_btn = QPushButton("Draw Global Exclusion")
-        self._draw_caption_btn     = QPushButton("Draw Caption Zone")
-        self._draw_note_btn        = QPushButton("Draw Endnote Zone")
-        self._draw_heading_btn     = QPushButton("Draw Heading Zone")
+        self._draw_fig_btn         = QPushButton("Figure Box")
+        self._draw_table_btn       = QPushButton("Table Box")
+        self._draw_excl_btn        = QPushButton("Exclusion Box")
+        self._draw_global_excl_btn = QPushButton("Global Exclusion")
+        self._draw_caption_btn     = QPushButton("Caption Zone")
+        self._draw_note_btn        = QPushButton("Endnote Zone")
+        self._draw_heading_btn     = QPushButton("Heading Zone")
         for btn in (self._draw_fig_btn, self._draw_table_btn, self._draw_excl_btn,
                     self._draw_global_excl_btn, self._draw_caption_btn,
                     self._draw_note_btn, self._draw_heading_btn):

@@ -218,6 +218,10 @@ def _analyze_all_pages_surya(project_dir: Path, page_records: list[dict]) -> dic
             # Pad figures and tables slightly so they're easier to review/adjust
             if category in ("figure", "table"):
                 box = _pad_box(box, pad=0.005)
+            # Surya's exclusion boxes (headers/footers) tend to be tight;
+            # pad a little more so boilerplate is fully masked before OCR.
+            if category == "exclusion":
+                box = _pad_box(box, pad=0.01)
             # Surya can't determine heading level — default to 1
             if category == "heading":
                 box["level"] = 1

@@ -8,7 +8,7 @@ The document model is a list of *elements* written to
 
     [
         {"kind": "heading", "level": 1, "text": "Chapter 1: Introduction",
-         "page": 1, "line_id": "p1_l001"},
+         "page": 1, "line_ids": ["p1_l001"]},
 
         {"kind": "paragraph", "text": "Full paragraph text...",
          "page": 1, "line_ids": ["p1_l002", "p1_l003"]},
@@ -181,6 +181,7 @@ def _process_page(
     para_lines: list[dict] = []       # accumulate body lines into paragraphs
     caption_lines: list[dict] = []    # accumulate caption lines into one element
     footnote_lines: list[dict] = []   # accumulate footnote lines
+    heading_lines: list[dict] = []    # accumulate heading lines within one box
 
     def _y(line_list: list[dict]) -> float:
         return line_list[0].get("bbox", {}).get("y", 0) if line_list else 0
@@ -197,6 +198,21 @@ def _process_page(
             "_y": _y(para_lines),
         })
         para_lines.clear()
+
+    def flush_heading():
+        if not heading_lines:
+            return
+        level = HEADING_LEVEL.get(heading_lines[0].get("type", "heading1"), 1)
+        text = _join_lines(heading_lines)
+        elements.append({
+            "kind": "heading",
+            "level": level,
+            "text": text,
+            "page": page_num,
+            "line_ids": [l["line_id"] for l in heading_lines],
+            "_y": _y(heading_lines),
+        })
+        heading_lines.clear()
 
     def flush_caption():
         if not caption_lines:
@@ -230,26 +246,33 @@ def _process_page(
             flush_paragraph()
             flush_caption()
             flush_footnotes()
-            elements.append({
-                "kind": "heading",
-                "level": HEADING_LEVEL[ltype],
-                "text": text,
-                "page": page_num,
-                "line_id": line["line_id"],
-                "_y": line.get("bbox", {}).get("y", 0),
-            })
+            # Flush if: different heading level OR gap large enough to indicate
+            # a separate heading box.  Same level + small gap → same box → join.
+            if heading_lines and (
+                heading_lines[-1].get("type") != ltype
+                or not _gap_continues(heading_lines[-1], line)
+            ):
+                flush_heading()
+            heading_lines.append(line)
 
         elif ltype == "caption":
             flush_paragraph()
+            flush_heading()
             flush_footnotes()
+            # Flush the current caption if there is a vertical gap — that means
+            # a new, separate caption zone has started on the same page.
+            if caption_lines and not _gap_continues(caption_lines[-1], line):
+                flush_caption()
             caption_lines.append(line)
 
         elif ltype == "footnote":
             flush_paragraph()
+            flush_heading()
             flush_caption()
             footnote_lines.append(line)
 
         else:  # body / other
+            flush_heading()
             flush_caption()
             if para_lines and not _continues_paragraph(
                 para_lines[-1], line, paragraph_boxes
@@ -258,6 +281,7 @@ def _process_page(
             para_lines.append(line)
 
     flush_paragraph()
+    flush_heading()
     flush_caption()
     flush_footnotes()
     return elements
@@ -519,54 +543,96 @@ _CAPTION_PATTERN = re.compile(
 
 def _associate_captions(elements: list[dict]) -> list[dict]:
     """
-    For each caption element, find the nearest figure on the same page and
-    link them.  Move the caption immediately after its figure in the element
-    list.
+    Associate each caption with the nearest unmatched figure, one-to-one.
+
+    Algorithm (greedy):
+    1. Repeatedly find the (caption, figure) pair with the smallest proximity
+       distance and assign them to each other.
+    2. Once a figure has been claimed it is removed from the candidate pool,
+       so no two captions compete for the same figure.
+    3. If there are more captions than figures the excess captions are
+       assigned to their nearest figure (allowing a figure to have multiple
+       captions in that case).
+
+    After assignment, captions are moved to immediately after their figure
+    in the element list.
     """
-    # Build index of figure positions
-    fig_positions: dict[str, int] = {}
+    # Build index: element id → element index (figures AND tables)
+    target_positions: dict[str, int] = {}
     for i, el in enumerate(elements):
-        if el["kind"] == "figure":
-            fig_positions[el["id"]] = i
+        if el["kind"] in ("figure", "table"):
+            target_positions[el["id"]] = i
 
-    result = list(elements)
+    # Collect unassigned captions as (element_index, element) pairs
+    unassigned: list[tuple[int, dict]] = [
+        (i, el)
+        for i, el in enumerate(elements)
+        if el["kind"] == "caption" and not el.get("figure_id")
+    ]
 
-    for i, el in enumerate(result):
-        if el["kind"] != "caption" or el.get("figure_id"):
-            continue
+    if not unassigned or not target_positions:
+        return _reorder_captions(elements)
 
-        page = el["page"]
-        best_fig_id = _find_nearest_figure(result, i, page, fig_positions)
-        if best_fig_id:
-            el["figure_id"] = best_fig_id
+    available: dict[str, int] = dict(target_positions)  # shrinks as targets are claimed
 
-    # Reorder: move each caption to immediately after its figure
-    result = _reorder_captions(result)
-    return result
+    # Phase 1: greedy one-to-one assignment while figures remain
+    while unassigned and available:
+        best_cap_pos: int | None = None
+        best_fig_id: str | None = None
+        best_dist = float("inf")
+
+        for list_pos, (ci, cap) in enumerate(unassigned):
+            for fig_id, fi in available.items():
+                fig_el = elements[fi]
+                if abs(fig_el["page"] - cap["page"]) > 1:
+                    continue
+                dist = abs(fi - ci) + abs(fig_el["page"] - cap["page"]) * 1000
+                if dist < best_dist:
+                    best_dist = dist
+                    best_cap_pos = list_pos
+                    best_fig_id = fig_id
+
+        if best_cap_pos is None:
+            break  # no reachable figure for any remaining caption
+
+        _, cap = unassigned.pop(best_cap_pos)
+        cap["figure_id"] = best_fig_id
+        del available[best_fig_id]
+
+    # Phase 2: excess captions (more captions than figures/tables) — assign to
+    # nearest target without exclusivity
+    for _, cap in unassigned:
+        best_id = _find_nearest_figure(elements, cap, target_positions)
+        if best_id:
+            cap["figure_id"] = best_id
+
+    return _reorder_captions(elements)
 
 
 def _find_nearest_figure(
     elements: list[dict],
-    caption_idx: int,
-    page: int,
+    caption: dict,
     fig_positions: dict[str, int],
 ) -> str | None:
-    """
-    Find the figure ID closest (by element list distance) to the caption,
-    searching on the same page first, then adjacent pages.
-    """
+    """Return the figure ID closest to *caption* by element-list distance."""
+    page = caption["page"]
+    # find caption's index in elements
+    cap_idx = next(
+        (i for i, el in enumerate(elements) if el is caption), None
+    )
+    if cap_idx is None:
+        return None
+
     best_id = None
     best_dist = float("inf")
-
-    for fig_id, fig_idx in fig_positions.items():
-        fig_el = elements[fig_idx]
+    for fig_id, fi in fig_positions.items():
+        fig_el = elements[fi]
         if abs(fig_el["page"] - page) > 1:
             continue
-        dist = abs(fig_idx - caption_idx) + abs(fig_el["page"] - page) * 1000
+        dist = abs(fi - cap_idx) + abs(fig_el["page"] - page) * 1000
         if dist < best_dist:
             best_dist = dist
             best_id = fig_id
-
     return best_id
 
 
@@ -589,7 +655,7 @@ def _reorder_captions(elements: list[dict]) -> list[dict]:
         if i in to_remove:
             continue
         new_elements.append(el)
-        if el["kind"] == "figure" and el["id"] in caption_map:
+        if el["kind"] in ("figure", "table") and el["id"] in caption_map:
             for cap_idx in caption_map[el["id"]]:
                 new_elements.append(elements[cap_idx])
 

@@ -77,8 +77,9 @@ def extract_figures(
 
     figure_records: list[dict] = []
     table_records:  list[dict] = []
+    n_pages = len(page_records)
 
-    for rec in page_records:
+    for page_idx, rec in enumerate(page_records):
         page_num = rec["page_number"]
         page_str = str(page_num)
         img_path = project_dir / rec["image_path"]
@@ -138,6 +139,7 @@ def extract_figures(
         masked.save(masked_dir / masked_filename, format="PNG")
         rec["masked_image_path"] = str(Path("pages_masked") / masked_filename)
         logger.debug("  Masked page %d (%d zones)", page_num, len(zones_to_mask))
+        print(f"EXTRACT_PROGRESS {page_idx + 1}/{n_pages}", flush=True)
 
     # Persist updated page records (with masked_image_path added)
     (project_dir / "pages.json").write_text(json.dumps(page_records, indent=2))

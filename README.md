@@ -20,20 +20,22 @@ Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive p
 
 ## Workflow
 
-This system uses an interactive, multi-step, pipeline approach, emphasizing the need for human oversight at each stage. The basic workflow of is:
+This system uses an interactive, multi-step pipeline approach, emphasising human oversight at each stage. The **Workbench** (`gui/workbench.py`) is the primary interface — it lets you run every step, inspect page images with bounding-box overlays, and edit the assembled Markdown, all in one window. The CLI (`cli.py`) is available as a fallback for scripting or when you need finer control over individual steps.
 
-1. Automatically wplit PDF into individual pages (render).
-2. Run the layout analysis to identify figures, tables, headings, captions, notes, and exclusion zones (using Surya by default).
-3. Manually check/edit the bounding boxes for each region (e.g., figure) using the provided GUI.
-4. Extract the figures using the edited bounding boxes.
-5. Optionally, get alt-text for each figure using Claude (API or web interface), and edit it using the GUI provided.
-6. Run the OCR (using Surya by default).
-7. Optionally, check/edit the OCR and/or extracted tables using the GUIs provided.
+The steps involved are:
+
+1. Automatically split PDF into individual pages (Render). Optionally follow up with automatic skew correction.
+2. Run layout analysis to identify figures, tables, headings, captions, notes, and exclusion zones (or draw these manually if you prefer).
+3. Review, correct, and/or add bounding boxes in the Bounding Box Editor.
+4. Automatically extract figures and produce masked page images.
+5. Optionally, generate alt-text for figures (Claude API or claude.ai), then review in the Alt-Text Editor.
+6. Run OCR (Surya by default).
+7. Optionally, correct OCR lines in the OCR Editor and table content in the Table Editor.
 8. Automatically assemble everything into a Markdown document.
-9. Edit the resulting file using any Markdown editor (e.g. Macdown), to manually correct small errors in things like heading levels, caption placement, endnote positions, and paragraph breaks.
-10. Export the final document to HTML or EPUB.
+9. Edit the Markdown directly in the Workbench (or any external editor) to fix heading levels, caption placement, endnote positions, etc.
+10. Export to HTML and/or EPUB, optionally including figures directly in a single output file.
 
-Note that scripts are set to not overwrite by default. If re-running a script, add the `--force` option on the command line to overwrite.
+Steps that have already produced output are not re-run unless you explicitly choose to overwrite them.
 
 ---
 
@@ -80,6 +82,7 @@ cd pdf-converter
 uv sync --extra surya
 
 # Minimal install — no Surya; use 'init-boxes' or 'import-boxes' for layout annotation,
+# (which requires manually drawing all bounding boxes),
 # and '--engine tesseract' for OCR
 uv sync
 
@@ -96,9 +99,23 @@ cp .env.example .env
 
 ## Usage
 
-### Step-by-step pipeline
+### Workbench (recommended)
 
-Each stage can be run independently, which is useful for re-running a single step after manual corrections. Some stages have multiple options.
+Open the Workbench and load a PDF — everything else can be done from there:
+
+```bash
+python gui/workbench.py
+```
+
+The left panel lists every pipeline step in order. Each CLI step shows a status dot (● green = output exists, ▶ yellow = in process, run ● grey = not yet run) and a ▶ Run button; GUI steps open the relevant editor in a separate window. The centre panel shows a continuous zoomable view of all pages with bounding-box overlays once layout analysis has run. The right panel shows editable **Markdown** with syntax highlighting once the assemble markdown step has been run.
+
+Steps whose output already exists will ask whether to overwrite before re-running. Edits saved from any of the sub-editors (Bounding Box Editor, OCR Editor, etc.) are detected automatically and the Workbench refreshes without needing a restart.
+
+---
+
+### Advanced / CLI reference
+
+Each pipeline step can also be run directly from the command line, which is useful for scripting, batch processing, or when you need options not exposed in the Workbench.
 
 ```bash
 # 1. Render PDF pages to PNG images
@@ -109,62 +126,63 @@ python cli.py deskew my_document.pdf               # all pages
 python cli.py deskew my_document.pdf --pages 2,5   # specific pages only
 
 # 2. Detect layout (figures, tables, exclusion zones)
+
 # Option A: Use Surya (requires installing with --extra surya; see above)
 python cli.py analyze my_document.pdf
-# Option B: Use claude.ai model for layout detection (no API key required, but less reliable than Surya):
+
+# Option B: Import layout from claude.ai (no API key required)
 #   Upload the PDF with the prompt from prompts/layout_analysis.md, then:
 python cli.py import-boxes my_document.pdf claude_response.json
-# Option C: Draw boxes manually instead
+
+# Option C: Draw boxes manually, after running init-boxes
 python cli.py init-boxes my_document.pdf
 
-# 3. Edit bounding boxes in the editor to review/correct detections
+# 3. Edit bounding boxes
 python gui/bbox_editor.py data/my_document/
 
-# 4. Extract final figures and produce masked page images
+# 4. Extract figures and produce masked page images
 python cli.py extract my_document.pdf
 
 # 5. Optionally, generate alt-text for figures
-# Option A: Automatically via Claude API (API key and funds required)
-python cli.py get-alt-text my_document.pdf
-# Option B (step 1): Export boxes for uploading to claude.ai (no API key required)
-python cli.py export-boxes my_document.pdf  # writes figures_prompt.json
-# Option B (step 2): Upload pages, boxes, and prompt (in prompts/alt_text.md), and save Claude's response as alt_text_response.json
-# Option B (step 3): save and then import alt-text from claude.ai
-python cli.py import-alt-text my_document.pdf alt_text_response.json
 
-# 5b. Optionally, open the alt-text editor to review and edit figure descriptions
+# Option A: Automatically via Claude API (API key required)
+python cli.py get-alt-text my_document.pdf
+
+# Option B: Via claude.ai (no API key required)
+python cli.py export-boxes my_document.pdf          # writes figures_prompt.json
+# … upload to claude.ai, save response as alt_text_response.json …
+python cli.py import-alt-text my_document.pdf alt_text_response.json
+# Then review / edit in the Alt-Text Editor:
 python gui/alt_text_editor.py data/my_document/
 
-# 6. Run OCR on all pages
-# Option A: Use Surya (better accuracy, handles math and multilingual text; may produce more complex output)
+# 6. Run OCR
+
+# Option A: using Surya (better accuracy)
 python cli.py ocr my_document.pdf --engine surya
-# Option B: Use Tesseract (lighter-weight; reliable for simple documents)
+
+# Option B: using tesseract (lighter-weight fallback)
 python cli.py ocr my_document.pdf --engine tesseract
 
-# 7. Optionally, open the OCR editor to correct text line mistakes
+# 7. Optionally, correct OCR output (line by line and tables)
 python gui/ocr_editor.py data/my_document/
-
-# 7b. Optionally, open the table editor to correct table OCR (image + Markdown side by side)
 python gui/table_editor.py data/my_document/
 
-# 8. Assemble Markdown (builds document structure and writes output/document.md)
+# 8. Assemble into Markdown
 python cli.py assemble my_document.pdf
 
-# 9. Edit the Markdown to fix any remaining issues (see "Editing the Markdown" below) using your favourite Markdown editor.
+# 9. Edit output/document.md to fix any remaining issues (see "Editing the Markdown" below)
 
-# 10. Export to HTML and/or EPUB
-python cli.py export my_document.pdf --formats html,epub
+# 10. Export
+python cli.py export my_document.pdf --formats html,epub --self-contained
 ```
 
-Edits made in the GUI tools are saved to `ocr_edited.json` and `boxes.json` in the project directory and are automatically used by subsequent pipeline steps.
-
-Surya requires PyTorch and will download model weights on first use (~1–2 GB). It is slower than Tesseract on CPU but produces better results, especially for documents with math or non-English text.
+Surya requires PyTorch and downloads model weights on first use (~1–2 GB). It is slower than Tesseract on CPU but produces better results, especially for documents with math or non-English text.
 
 ---
 
 ### Editing the Markdown
 
-After `assemble`, open `output/document.md` in any text editor and work through the items below. Re-run `export` once you are happy with it.
+After `assemble`, open `output/document.md` in any text editor or the workbench GUI and work through the items below. For best results, using an editor such as Macdown which also renders the markdown may be helpful. Finally, re-run `export` once you are happy with it.
 
 #### Heading levels
 
@@ -211,6 +229,21 @@ Captions are linked to their figure by proximity. Occasionally a caption is atta
 </figure>
 ```
 
+#### Table caption placement
+
+Tables with captions are wrapped in `<figure markdown="1">` tags, which allows the Markdown table syntax inside to be rendered correctly alongside a `<figcaption>`. To add a caption to a table without one, use the following format:
+
+```html
+<figure markdown="1">
+
+| Header 1 | Header 2 |
+| -------- | -------- |
+| Cell 1   | Cell 2   |
+
+<figcaption>Table 1: This is a table caption.</figcaption>
+</figure>
+```
+
 #### Bold and italic
 
 Use standard Markdown syntax, which exports correctly to `<strong>` and `<em>` in HTML:
@@ -218,7 +251,6 @@ Use standard Markdown syntax, which exports correctly to `<strong>` and `<em>` i
 ```markdown
 **bold text**
 _italic text_
-_alternate italics_
 **_bold and italic_**
 ```
 
@@ -266,6 +298,29 @@ If Tesseract was used (which has no math support), equations appear as garbled t
 ---
 
 ## GUI tools
+
+### Workbench
+
+The primary interface for the full conversion pipeline. Run every step, inspect pages, and edit the assembled Markdown — all without touching the command line.
+
+```bash
+python gui/workbench.py my_document.pdf
+python gui/workbench.py          # opens a file chooser
+```
+
+| Panel  | Contents                                                                                                                                                                                             |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Left   | Pipeline steps in order; each CLI step has a status dot (● green = done, ▶ yellow = running, ● grey = pending), an optional engine selector, and a ▶ Run button; GUI steps open the relevant editor as a separate window |
+| Centre | Continuous scrollable view of all pages with bounding-box overlays; Ctrl+scroll or pinch to zoom; ◀/▶ jump to previous/next page                                                                     |
+| Right  | Editable assembled Markdown with syntax highlighting, dark/light mode toggle, and font size controls; appears once the Assemble step has run                                                          |
+| Bottom | Log output from running CLI commands                                                                                                                                                                 
+
+- Clicking ▶ when a step's output already exists asks whether to overwrite.
+- The Markdown tab is editable; **💾 Save Markdown** writes back to `output/document.md`. Assemble warns you if there are unsaved edits.
+- Changes saved from any sub-editor (boxes, OCR, tables) are detected automatically and the Workbench refreshes without a restart.
+- The **A− / A+** buttons and Ctrl+scroll adjust the Markdown editor font size. The **☀/🌙** button toggles dark/light mode.
+
+---
 
 ### Bounding Box Editor
 

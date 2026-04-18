@@ -72,6 +72,7 @@ def render_pdf(pdf_path: Path, project_dir: Path, dpi: int = config.RENDER_DPI) 
     except PDFPageCountError as exc:
         raise RuntimeError(f"Could not read PDF: {exc}") from exc
 
+    n_pages = len(pil_images)
     records: list[dict] = []
     for idx, img in enumerate(pil_images):
         page_number = idx + 1
@@ -88,7 +89,7 @@ def render_pdf(pdf_path: Path, project_dir: Path, dpi: int = config.RENDER_DPI) 
                 "dpi": dpi,
             }
         )
-        logger.debug("  saved %s (%dx%d)", filename, img.width, img.height)
+        logger.info("  page %d / %d  (%dx%d px)", page_number, n_pages, img.width, img.height)
 
     manifest_path.write_text(json.dumps(records, indent=2))
     logger.info("Rendered %d pages.", len(records))
