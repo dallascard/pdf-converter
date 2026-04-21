@@ -84,7 +84,7 @@ _SPINNER_FRAMES = ("|", "/", "—", "\\")
 #               (only applicable to the ocr step; analyze always uses surya)
 
 _STEPS = [
-    dict(key="render",      label="1. Render pages",       kind="cli", arg="render",
+    dict(key="render",      label="1. Render pages (slow)",       kind="cli", arg="render",
          output="pages.json"),
     dict(key="deskew",      label="1b. Deskew (optional)",        kind="cli", arg="deskew",
          output="deskew.json", optional=True),
@@ -668,10 +668,6 @@ class WorkbenchWindow(QMainWindow):
         self._refresh_center_panel()
         self._refresh_right_panel()
 
-        # Auto-render on first open (pages.json absent means never rendered)
-        if not self._page_records:
-            self._log(f"New project — automatically starting Render step for {pdf_path.name}…\n")
-            self._run_cli_step("render", "render", "pages.json", [])
 
     def _update_watchers(self):
         """Add existing project files to the file watcher."""
