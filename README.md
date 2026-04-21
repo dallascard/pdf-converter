@@ -465,3 +465,8 @@ data/my_document/
     ├── document.html
     └── document.epub
 ```
+
+
+## License
+
+This project is released under an [Apache 2.0 license](LICENSE).
