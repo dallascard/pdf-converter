@@ -67,8 +67,15 @@ from PyQt6.QtWidgets import (
     QGraphicsScene, QGraphicsView,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QStatusBar, QToolBar, QVBoxLayout, QWidget,
+    QStackedWidget, QStatusBar, QToolBar, QVBoxLayout, QWidget,
 )
+
+try:
+    from PyQt6.QtPdf import QPdfDocument
+    from PyQt6.QtPdfWidgets import QPdfView
+    _QT_PDF_AVAILABLE = True
+except Exception:
+    _QT_PDF_AVAILABLE = False
 
 _SPINNER_FRAMES = ("|", "/", "—", "\\")
 
@@ -84,14 +91,16 @@ _SPINNER_FRAMES = ("|", "/", "—", "\\")
 #               (only applicable to the ocr step; analyze always uses surya)
 
 _STEPS = [
-    dict(key="render",      label="1. Render pages (slow)",       kind="cli", arg="render",
+    dict(key="render",      label="1. Render pages (slow)",             kind="cli", arg="render",
          output="pages.json"),
-    dict(key="deskew",      label="1b. Deskew (optional)",        kind="cli", arg="deskew",
+    dict(key="rotate",      label="1b. Auto-rotate pages (optional)",   kind="cli", arg="auto-rotate",
+         output="rotate.json", optional=True),
+    dict(key="deskew",      label="1c. Deskew (optional)",              kind="cli", arg="deskew",
          output="deskew.json", optional=True),
     dict(key="analyze",     label="2. Detect layout",             kind="cli", arg="analyze",
          output="boxes.json"),
     dict(key="edit_boxes",  label="  Edit boxes",                 kind="gui", arg="gui/bbox_editor.py"),
-    dict(key="extract",     label="3. Extract figures",           kind="cli", arg="extract",
+    dict(key="extract",     label="3. Confirm layout",            kind="cli", arg="extract",
          output="figures.json"),
     dict(key="compress",    label="3b. Compress figures (opt.)",  kind="cli", arg="compress-figures",
          output="compress.json", optional=True),
@@ -509,9 +518,29 @@ class WorkbenchWindow(QMainWindow):
         nav.addWidget(self._next_page_btn)
         c_layout.addLayout(nav)
 
+        self._center_stack = QStackedWidget()
+
+        # Page 0: rendered-page viewer (used after Render step)
         self._page_viewer = MultiPageViewer()
         self._page_viewer.currentPageChanged.connect(self._on_current_page_changed)
-        c_layout.addWidget(self._page_viewer)
+        self._center_stack.addWidget(self._page_viewer)
+
+        # Page 1: native PDF preview (shown before Render step)
+        if _QT_PDF_AVAILABLE:
+            self._pdf_doc = QPdfDocument(self)
+            self._pdf_preview = QPdfView(self)
+            self._pdf_preview.setDocument(self._pdf_doc)
+            self._pdf_preview.setPageMode(QPdfView.PageMode.MultiPage)
+            self._pdf_preview.setZoomMode(QPdfView.ZoomMode.FitInView)
+        else:
+            self._pdf_doc = None
+            self._pdf_preview = QLabel(
+                "Load a PDF, then click Run on the Render step to view pages here.",
+                alignment=Qt.AlignmentFlag.AlignCenter,
+            )
+        self._center_stack.addWidget(self._pdf_preview)
+
+        c_layout.addWidget(self._center_stack)
         main_split.addWidget(center)
 
         # ── Right: OCR / Markdown tabs ────────────────────────────────
@@ -659,6 +688,10 @@ class WorkbenchWindow(QMainWindow):
         self._proj_dir.mkdir(parents=True, exist_ok=True)
         self._pdf_label.setText(f"  {pdf_path.name}  →  {self._proj_dir}")
         self._pdf_label.setStyleSheet("color: #ddd;")
+
+        # Load the PDF into the native preview (shown before Render runs).
+        if _QT_PDF_AVAILABLE and self._pdf_doc is not None:
+            self._pdf_doc.load(str(pdf_path))
 
         self._reload_project_data()
         self._update_watchers()
@@ -989,12 +1022,20 @@ class WorkbenchWindow(QMainWindow):
     def _refresh_center_panel(self):
         n = len(self._page_records)
         if n == 0:
-            self._page_label.setText("  No pages  ")
+            # Show PDF preview (stack index 1) if a PDF is loaded, else clear viewer.
+            if self._pdf_path is not None:
+                self._center_stack.setCurrentIndex(1)
+                self._page_label.setText("  PDF preview — run Render to enable editing  ")
+            else:
+                self._center_stack.setCurrentIndex(0)
+                self._page_label.setText("  No pages  ")
             self._prev_page_btn.setEnabled(False)
             self._next_page_btn.setEnabled(False)
             self._page_viewer.show_pages([], None, {})
             return
 
+        # Rendered pages available — switch to the page viewer.
+        self._center_stack.setCurrentIndex(0)
         self._page_viewer.show_pages(self._page_records, self._proj_dir, self._boxes)
         # Nav label/buttons are updated via currentPageChanged once the scene settles
 

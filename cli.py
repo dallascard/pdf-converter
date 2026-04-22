@@ -6,7 +6,8 @@ Usage examples
 
   # Run individual steps
   python cli.py render           my_document.pdf
-  python cli.py deskew           my_document.pdf   # optional: fix rotated scans
+  python cli.py auto-rotate      my_document.pdf   # optional: fix 90°/180°/270° page rotation
+  python cli.py deskew           my_document.pdf   # optional: fix small rotational skew
   python cli.py analyze          my_document.pdf   # Surya layout detection
   python gui/bbox_editor.py      data/my_document/ # review/edit boxes
   python cli.py extract          my_document.pdf
@@ -28,7 +29,8 @@ Usage examples
 Step descriptions
 -----------------
   render           PDF → per-page PNG images
-  deskew           Straighten rotated page scans (optional; run after render)
+  auto-rotate      Correct 90°-increment rotation per page via Tesseract OSD (optional)
+  deskew           Correct small rotational skew (optional; run after render/auto-rotate)
   analyze          Page images → layout boxes via Surya (figures + tables + zones)
   init-boxes       Create empty boxes.json for fully manual annotation
   import-boxes     Import boxes.json produced via claude.ai
@@ -53,6 +55,7 @@ import click
 
 import config
 from core.pdf_renderer import render_pdf
+from core.auto_rotate import rotate_pages
 from core.deskewer import deskew_pages
 from core.image_compressor import compress_figures
 from core.alt_text import run_alt_text, export_alt_text_prompt, import_alt_text_response
@@ -135,6 +138,45 @@ def render(pdf_file, project_dir, force, dpi):
     logger.info("Rendering %s → %s", pdf_path.name, proj)
     records = render_pdf(pdf_path, proj, dpi=dpi)
     click.echo(f"Rendered {len(records)} pages to {proj / 'pages'}")
+
+
+# ---------------------------------------------------------------------------
+# auto-rotate
+# ---------------------------------------------------------------------------
+
+@cli.command("auto-rotate")
+@_pdf_argument
+@_project_dir_option
+@_force_option
+@click.option("--pages", default=None,
+              help="Comma-separated 1-based page numbers to process (default: all).")
+def auto_rotate(pdf_file, project_dir, force, pages):
+    """Detect and correct 90°-increment page rotation.
+
+    Runs a quick Tesseract OCR pass on a thumbnail at each of the four
+    cardinal orientations and picks the one that produces the most words.
+    Overwrites page PNGs in-place; re-run 'render' to restore originals.
+    Results are saved to rotate.json.  Run before 'deskew' if needed.
+    """
+    import json
+    proj = _resolve_project_dir(pdf_file, project_dir)
+    page_records = json.loads((proj / "pages.json").read_text())
+
+    page_filter = None
+    if pages:
+        try:
+            page_filter = [int(p.strip()) for p in pages.split(",")]
+        except ValueError:
+            raise click.BadParameter("--pages must be comma-separated integers, e.g. 1,3,5")
+
+    results = rotate_pages(proj, page_records, pages=page_filter, force=force)
+
+    rotated = [r for r in results if not r["skipped"] and r["degrees"] != 0]
+    if rotated:
+        summary = ", ".join(f"p{r['page']}={r['degrees']}°" for r in rotated)
+        click.echo(f"Rotated {len(rotated)} page(s): {summary}")
+    else:
+        click.echo("No rotation needed (all pages already correctly oriented).")
 
 
 # ---------------------------------------------------------------------------
