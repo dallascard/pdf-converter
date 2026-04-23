@@ -235,7 +235,50 @@ def _analyze_all_pages_surya(project_dir: Path, page_records: list[dict]) -> dic
                     len(result["exclusions"]),
                     len(result["paragraphs"]))
 
+    _assign_heading_levels(raw_pages)
     return raw_pages
+
+
+# ---------------------------------------------------------------------------
+# Heading level inference
+# ---------------------------------------------------------------------------
+
+def _assign_heading_levels(raw_pages: dict, max_levels: int = 3, gap_ratio: float = 0.80) -> None:
+    """Reassign heading zone levels based on box heights across all pages.
+
+    Heading zones are sorted by height (largest first = H1).  Whenever a
+    zone's height drops below *gap_ratio* × the tallest zone in the current
+    level, a new level is started.  At most *max_levels* distinct levels are
+    created (excess zones are grouped into the deepest level).
+
+    Mutates raw_pages in-place; no-ops if fewer than two heading zones exist.
+    """
+    all_boxes: list[dict] = []
+    for page_data in raw_pages.values():
+        all_boxes.extend(page_data.get("headings", []))
+
+    if len(all_boxes) < 2:
+        return
+
+    all_boxes.sort(key=lambda b: b["h"], reverse=True)
+
+    current_level = 1
+    level_max = all_boxes[0]["h"]
+
+    for box in all_boxes:
+        h = box["h"]
+        if current_level < max_levels and h < level_max * gap_ratio:
+            current_level += 1
+            level_max = h
+        box["level"] = current_level
+
+    counts = {}
+    for box in all_boxes:
+        counts[box["level"]] = counts.get(box["level"], 0) + 1
+    logger.info(
+        "Heading levels assigned: %s",
+        ", ".join(f"H{lvl}={n}" for lvl, n in sorted(counts.items())),
+    )
 
 
 # ---------------------------------------------------------------------------
