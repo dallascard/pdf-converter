@@ -2,7 +2,7 @@
 name = "pdf-converter"
 version = "0.1.0"
 description = "Convert scanned PDFs to Markdown, HTML, and EPUB using Claude Vision OCR"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"  # surya 0.17 caps pillow <11, which has no Python 3.14 wheels
 dependencies = [
     # PDF processing
     "pdf2image>=1.17.0",
