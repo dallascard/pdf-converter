@@ -30,6 +30,8 @@ from pathlib import Path
 
 from PIL import Image
 
+import config
+
 logger = logging.getLogger(__name__)
 
 _THUMB_MAX_PX = 1200
@@ -68,16 +70,17 @@ def detect_rotations_surya(imgs: list[Image.Image]) -> list[int]:
         FoundationPredictor(checkpoint=surya_settings.LAYOUT_MODEL_CHECKPOINT)
     )
 
-    thumbs = [_make_thumb(img).convert("RGB") for img in imgs]
-    logger.info("  Running layout detection on %d page(s) …", len(thumbs))
-    predictions = predictor(thumbs)
+    n = len(imgs)
+    results: list[int] = []
 
-    results = []
-    for page_idx, (thumb, pred) in enumerate(zip(thumbs, predictions)):
+    for i, img in enumerate(imgs):
+        logger.info("  Rotation detection: page %d / %d …", i + 1, n)
+        thumb = _make_thumb(img).convert("RGB")
         W, H = thumb.size
-        deg = _infer_rotation(pred.bboxes, W, H)
-        logger.debug("  page %d → %d°", page_idx + 1, deg)
-        results.append(deg)
+        (pred,) = predictor([thumb])
+        del thumb
+        _empty_device_cache()
+        results.append(_infer_rotation(pred.bboxes, W, H))
 
     return results
 
@@ -295,6 +298,18 @@ def _tesseract_word_count(img: Image.Image) -> int:
         return 0
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _empty_device_cache() -> None:
+    """Release cached GPU/MPS tensors back to the OS between batches."""
+    try:
+        import torch
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _write_rotate_json(

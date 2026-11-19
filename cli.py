@@ -4,7 +4,7 @@ cli.py — Command-line interface for pdf-converter.
 Usage examples
 --------------
 
-  # Run individual steps
+  # Run individual steps (PDF workflow)
   python cli.py render           my_document.pdf
   python cli.py auto-rotate      my_document.pdf   # optional: fix 90°/180°/270° page rotation
   python cli.py deskew           my_document.pdf   # optional: fix small rotational skew
@@ -39,7 +39,7 @@ Step descriptions
   get-alt-text     Generate alt-text for figures via Claude API
   export-boxes     Export figure list for manual alt-text via claude.ai
   import-alt-text  Import alt-text response from claude.ai into figures.json
-  ocr              Masked pages → structured OCR text (surya or tesseract)
+  ocr              Masked pages → structured OCR text (surya, tesseract, tesseract-legacy, gocr, ocrad, ollama, vllm)
   apply-zones      Re-apply caption/endnote zone classification to existing OCR
   assemble         OCR lines → document model → Markdown (structure.json + document.md)
   export           Markdown → HTML / EPUB
@@ -55,6 +55,7 @@ import click
 
 import config
 from core.pdf_renderer import render_pdf
+from core.page_importer import import_pages
 from core.auto_rotate import rotate_pages
 from core.deskewer import deskew_pages
 from core.image_compressor import compress_figures
@@ -65,6 +66,8 @@ from core.ocr import run_ocr, load_ocr
 from core.structure import build_structure
 from core.assembler import assemble_markdown
 from core.exporter import export
+from core.masked_exporter import export_masked_pages
+from core.text_exporter import export_text_json
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -83,7 +86,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _pdf_argument(func):
-    return click.argument("pdf_file", type=click.Path(exists=True, dir_okay=False))(func)
+    # pdf_file is optional so that commands can be driven by --project-dir alone
+    # (e.g. when the project was created from an image directory rather than a PDF).
+    return click.argument(
+        "pdf_file", required=False, default=None,
+        type=click.Path(exists=True, dir_okay=False),
+    )(func)
 
 
 def _project_dir_option(func):
@@ -102,12 +110,15 @@ def _force_option(func):
     )(func)
 
 
-def _resolve_project_dir(pdf_file: str, project_dir: str | None) -> Path:
-    pdf_path = Path(pdf_file)
+def _resolve_project_dir(pdf_file: str | None, project_dir: str | None) -> Path:
     if project_dir:
         p = Path(project_dir)
+    elif pdf_file:
+        p = config.DATA_ROOT / Path(pdf_file).stem
     else:
-        p = config.DATA_ROOT / pdf_path.stem
+        raise click.UsageError(
+            "Either PDF_FILE or --project-dir must be provided."
+        )
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -119,6 +130,38 @@ def _resolve_project_dir(pdf_file: str, project_dir: str | None) -> Path:
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli():
     """pdf-converter — Convert scanned PDFs to Markdown, HTML, and EPUB."""
+
+
+# ---------------------------------------------------------------------------
+# import-pages
+# ---------------------------------------------------------------------------
+
+@cli.command("import-pages")
+@click.argument("image_dir", type=click.Path(exists=True, file_okay=False))
+@_project_dir_option
+@_force_option
+def import_pages_cmd(image_dir, project_dir, force):
+    """Import a directory of image files as project pages (alternative to render).
+
+    Use this instead of 'render' when your source material is already a set of
+    per-page image files (TIF, PNG, JPG, etc.) rather than a single PDF.
+
+    Images are sorted in natural filename order, converted to 8-bit RGB PNG,
+    copied to <project-dir>/pages/, and indexed in pages.json.  All subsequent
+    pipeline steps (analyze, ocr, assemble, export …) then work as normal.
+
+    Example:
+        python cli.py import-pages /scans/my_document/ --project-dir data/my_document/
+    """
+    img_dir = Path(image_dir)
+    if project_dir:
+        proj = Path(project_dir)
+    else:
+        proj = config.DATA_ROOT / img_dir.name
+    proj.mkdir(parents=True, exist_ok=True)
+
+    records = import_pages(img_dir, proj, force=force)
+    click.echo(f"Imported {len(records)} pages to {proj / 'pages'}")
 
 
 # ---------------------------------------------------------------------------
@@ -363,11 +406,27 @@ def import_alt_text_cmd(pdf_file, project_dir, json_file):
 @_project_dir_option
 @_force_option
 @click.option("--engine", default="tesseract", show_default=True,
-              type=click.Choice(["tesseract", "surya"]),
+              type=click.Choice(["tesseract", "surya", "tesseract-legacy", "gocr", "ocrad", "ollama", "vllm"]),
               help="OCR engine to use.")
-def ocr(pdf_file, project_dir, force, engine):
+@click.option("--ollama-model", default=None,
+              help="Ollama model for --engine ollama (default: OLLAMA_MODEL from .env, else glm-ocr).")
+@click.option("--vllm-model", default=None,
+              help="Model for --engine vllm (default: VLLM_MODEL from .env, else the one model the server serves).")
+@click.option("--vllm-host", default=None,
+              help="Server address for --engine vllm (default: VLLM_HOST from .env, else http://localhost:8000).")
+@click.option("--concurrency", default=None, type=int,
+              help="Pages OCR'd in parallel with --engine vllm (default: VLLM_CONCURRENCY, else 16).")
+def ocr(pdf_file, project_dir, force, engine, ollama_model, vllm_model, vllm_host, concurrency):
     """Run OCR on masked page images."""
     import json
+    if ollama_model:
+        config.OLLAMA_MODEL = ollama_model
+    if vllm_model:
+        config.VLLM_MODEL = vllm_model
+    if vllm_host:
+        config.VLLM_HOST = vllm_host
+    if concurrency:
+        config.VLLM_CONCURRENCY = concurrency
     proj = _resolve_project_dir(pdf_file, project_dir)
     pages = json.loads((proj / "pages.json").read_text())
     results = run_ocr(proj, pages, engine=engine, force=force)
@@ -619,6 +678,71 @@ def export_cmd(pdf_file, project_dir, formats, title, author, self_contained, fo
 
 # Rename to avoid shadowing built-in
 cli.add_command(export_cmd, name="export")
+
+
+# ---------------------------------------------------------------------------
+# export-masked
+# ---------------------------------------------------------------------------
+
+@cli.command("export-masked")
+@_pdf_argument
+@_project_dir_option
+@_force_option
+@click.option(
+    "--mask", "mask_types",
+    multiple=True,
+    type=click.Choice(["figures", "tables", "exclusions", "captions", "notes", "headings"]),
+    default=["exclusions"],
+    show_default=True,
+    help="Region type to paint white. Repeat to mask multiple types.",
+)
+def export_masked_cmd(pdf_file, project_dir, force, mask_types):
+    """Export page images as a PDF with selected regions masked white.
+
+    Each page is taken from the original rendered images (not the OCR-masked
+    copies), and the selected region types are painted white before saving.
+    Requires boxes.json (run 'analyze' or 'init-boxes' first).
+
+    Examples:
+
+    \b
+        python cli.py export-masked my_doc.pdf --mask exclusions
+        python cli.py export-masked my_doc.pdf --mask exclusions --mask figures --mask tables
+    """
+    import json
+    proj = _resolve_project_dir(pdf_file, project_dir)
+    pages = json.loads((proj / "pages.json").read_text())
+    out_path = proj / "output" / "masked_pages.pdf"
+    export_masked_pages(proj, pages, set(mask_types), out_path, force=force)
+    click.echo(f"Masked PDF written to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# export-text
+# ---------------------------------------------------------------------------
+
+@cli.command("export-text")
+@_pdf_argument
+@_project_dir_option
+@_force_option
+def export_text_cmd(pdf_file, project_dir, force):
+    """Export per-page heading, body and footnote text as JSON.
+
+    Reads the OCR output (edited if available, raw otherwise) and writes a
+    JSON array where each entry has ``page_number`` and ``text`` fields.
+    Footnotes follow the body text on their page. Captions, figures, and
+    tables are excluded.
+
+    Can be run immediately after OCR — does not require the Assemble step.
+
+    Output: output/document.json
+    """
+    import json as _json
+    proj = _resolve_project_dir(pdf_file, project_dir)
+    pages = _json.loads((proj / "pages.json").read_text())
+    out_path = proj / "output" / "document.json"
+    export_text_json(proj, pages, out_path, force=force)
+    click.echo(f"Text JSON written to {out_path}")
 
 
 # ---------------------------------------------------------------------------

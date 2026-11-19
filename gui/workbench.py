@@ -63,7 +63,7 @@ from PyQt6.QtGui import (
     QSyntaxHighlighter, QTextCharFormat,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QGraphicsScene, QGraphicsView,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
@@ -113,8 +113,12 @@ _STEPS = [
     dict(key="edit_tables", label="  Edit tables",         kind="gui", arg="gui/table_editor.py"),
     dict(key="assemble",    label="6. Assemble Markdown",  kind="cli", arg="assemble",
          output="output/document.md"),
-    dict(key="export",      label="7. Export",             kind="cli", arg="export",
+    dict(key="export",        label="7. Export",                        kind="cli", arg="export",
          output="output/document.html"),
+    dict(key="export_masked", label="7b. Export masked pages (opt.)",   kind="cli", arg="export-masked",
+         output="output/masked_pages.pdf", optional=True),
+    dict(key="export_text",   label="7c. Export text JSON (opt.)",      kind="cli", arg="export-text",
+         output="output/document.json",    optional=True),
 ]
 
 # Box overlay colours — match bbox_editor.py
@@ -404,6 +408,7 @@ class WorkbenchWindow(QMainWindow):
     def __init__(self, pdf_path: Path | None = None):
         super().__init__()
         self._pdf_path: Path | None = None
+        self._img_dir: Path | None = None   # set when source is an image directory
         self._proj_dir: Path | None = None
         self._process: QProcess | None = None
         self._current_page_idx: int = 0
@@ -452,9 +457,12 @@ class WorkbenchWindow(QMainWindow):
         self.addToolBar(toolbar)
         open_btn = QPushButton("📂 Open PDF")
         open_btn.clicked.connect(self._prompt_open_pdf)
-        self._pdf_label = QLabel("  No PDF selected")
+        open_dir_btn = QPushButton("🖼 Open image dir…")
+        open_dir_btn.clicked.connect(self._prompt_open_image_dir)
+        self._pdf_label = QLabel("  No source selected")
         self._pdf_label.setStyleSheet("color: #888;")
         toolbar.addWidget(open_btn)
+        toolbar.addWidget(open_dir_btn)
         toolbar.addWidget(self._pdf_label)
 
         # Outer vertical splitter: top (3 columns) | bottom (log)
@@ -640,9 +648,18 @@ class WorkbenchWindow(QMainWindow):
 
             if step.get("engine"):
                 combo = QComboBox()
-                combo.addItems(["surya", "tesseract"])
+                # userData = extra CLI args for this choice
+                for label, args in (
+                        ("surya", ["--engine", "surya"]),
+                        ("tesseract", ["--engine", "tesseract"]),
+                        ("tess-legacy", ["--engine", "tesseract-legacy"]),
+                        ("gocr", ["--engine", "gocr"]),
+                        ("ocrad", ["--engine", "ocrad"]),
+                        ("GLM-OCR (Ollama)", ["--engine", "ollama", "--ollama-model", "glm-ocr"]),
+                        ("Qwen3-VL-8B (Ollama)", ["--engine", "ollama", "--ollama-model", "qwen3-vl:8b"])):
+                    combo.addItem(label, args)
                 combo.setMinimumWidth(60)
-                combo.setMaximumWidth(82)
+                combo.setMaximumWidth(170)
                 self._engine_combos[key] = combo
                 h.addSpacing(6)              # small gap between label and engine selector
                 h.addWidget(combo)
@@ -684,6 +701,7 @@ class WorkbenchWindow(QMainWindow):
 
     def _load_pdf(self, pdf_path: Path):
         self._pdf_path = pdf_path
+        self._img_dir = None
         self._proj_dir = _DATA_ROOT / pdf_path.stem
         self._proj_dir.mkdir(parents=True, exist_ok=True)
         self._pdf_label.setText(f"  {pdf_path.name}  →  {self._proj_dir}")
@@ -701,6 +719,61 @@ class WorkbenchWindow(QMainWindow):
         self._refresh_center_panel()
         self._refresh_right_panel()
 
+    def _prompt_open_image_dir(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select image directory", str(PIPELINE_ROOT),
+        )
+        if path:
+            self._load_image_dir(Path(path))
+
+    def _load_image_dir(self, img_dir: Path):
+        self._img_dir = img_dir
+        self._pdf_path = None
+        self._proj_dir = _DATA_ROOT / img_dir.name
+        self._proj_dir.mkdir(parents=True, exist_ok=True)
+        self._pdf_label.setText(f"  {img_dir.name}/  →  {self._proj_dir}")
+        self._pdf_label.setStyleSheet("color: #ddd;")
+
+        self._reload_project_data()
+        self._update_watchers()
+        self._enable_run_buttons(True)
+        self._update_status()
+        self._current_page_idx = 0
+        self._refresh_center_panel()
+        self._refresh_right_panel()
+
+        # Import pages immediately (equivalent to the Render step for PDFs).
+        if not self._page_records:
+            self._log(f"Importing pages from {img_dir.name}/ …\n")
+            self._run_import_pages()
+
+    def _run_import_pages(self):
+        """Run import-pages for the current image directory project."""
+        if self._img_dir is None or self._proj_dir is None:
+            return
+        args = [
+            "cli.py", "import-pages", str(self._img_dir),
+            "--project-dir", str(self._proj_dir),
+        ]
+        dot = self._status_labels.get("render")
+        if dot:
+            dot.setText("▶")
+            dot.setStyleSheet("color: #ffaa00; font-size: 13px;")
+        self._enable_run_buttons(False)
+        self._running_step_key = "render"
+        self._start_spinner("Importing pages")
+        self._log("(this may take a moment)\n")
+        import sys
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda: self._log(proc.readAllStandardOutput().data().decode(errors="replace"))
+        )
+        proc.finished.connect(
+            lambda code, _: self._on_finished("render", code)
+        )
+        self._process = proc
+        proc.start(sys.executable, args)
 
     def _update_watchers(self):
         """Add existing project files to the file watcher."""
@@ -790,6 +863,10 @@ class WorkbenchWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_run_clicked(self, step: dict):
+        if step["key"] == "export_masked":
+            self._show_export_masked_dialog()
+            return
+
         # Guard: warn if assemble would overwrite unsaved Markdown edits
         if step["key"] == "assemble" and self._md_dirty:
             reply = QMessageBox.question(
@@ -809,7 +886,7 @@ class WorkbenchWindow(QMainWindow):
 
         extra: list[str] = []
         if step.get("engine") and step["key"] in self._engine_combos:
-            extra += ["--engine", self._engine_combos[step["key"]].currentText()]
+            extra += self._engine_combos[step["key"]].currentData()
         if step["key"] == "export":
             fmts = []
             if self._export_html_cb.isChecked():
@@ -830,8 +907,78 @@ class WorkbenchWindow(QMainWindow):
 
         self._run_cli_step(step["key"], step["arg"], step.get("output"), extra)
 
+    def _show_export_masked_dialog(self):
+        if self._proj_dir is None:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export Masked Pages")
+        dlg.setMinimumWidth(340)
+
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("Select which regions to paint white:"))
+
+        _OPTIONS = [
+            ("exclusions", "Exclusions (headers, footers, page numbers)", True),
+            ("figures",    "Figures",                                       False),
+            ("tables",     "Tables",                                        False),
+            ("captions",   "Captions",                                      False),
+            ("notes",      "Notes / endnotes",                              False),
+            ("headings",   "Headings",                                      False),
+        ]
+        checkboxes: dict[str, QCheckBox] = {}
+        for key, label, default in _OPTIONS:
+            cb = QCheckBox(label)
+            cb.setChecked(default)
+            checkboxes[key] = cb
+            layout.addWidget(cb)
+
+        out_rel = "output/masked_pages.pdf"
+        out_lbl = QLabel(f"Output: {out_rel}")
+        out_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(out_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        export_btn = QPushButton("Export PDF")
+        export_btn.setDefault(True)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(export_btn)
+        layout.addLayout(btn_row)
+
+        cancel_btn.clicked.connect(dlg.reject)
+
+        def _on_export():
+            selected = [k for k, cb in checkboxes.items() if cb.isChecked()]
+            if not selected:
+                QMessageBox.warning(
+                    dlg, "No selection",
+                    "Please select at least one region type to mask.",
+                )
+                return
+            dlg.accept()
+            extra = ["--force"]
+            for t in selected:
+                extra += ["--mask", t]
+            # Pass output=None to skip the "already exists" dialog — the user
+            # has already confirmed by clicking Export in the dialog above.
+            self._run_cli_step("export_masked", "export-masked", None, extra)
+
+        export_btn.clicked.connect(_on_export)
+        dlg.exec()
+
     def _run_cli_step(self, key: str, cmd: str, output: str | None, extra: list[str]):
-        if self._pdf_path is None or self._proj_dir is None:
+        if self._proj_dir is None:
+            return
+        # Render is PDF-only; image-dir projects use import-pages (runs automatically).
+        if key == "render" and self._pdf_path is None:
+            QMessageBox.information(
+                self, "Not applicable",
+                "The Render step is only used for PDF sources.\n"
+                "Pages were already imported from the image directory.",
+            )
             return
 
         force = False
@@ -846,7 +993,10 @@ class WorkbenchWindow(QMainWindow):
                 return
             force = True
 
-        args = ["cli.py", cmd, str(self._pdf_path)] + extra
+        if self._pdf_path is not None:
+            args = ["cli.py", cmd, str(self._pdf_path)] + extra
+        else:
+            args = ["cli.py", cmd, "--project-dir", str(self._proj_dir)] + extra
         if force:
             args.append("--force")
 

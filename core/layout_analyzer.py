@@ -40,6 +40,8 @@ from pathlib import Path
 
 from PIL import Image
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -185,19 +187,24 @@ def _analyze_all_pages_surya(project_dir: Path, page_records: list[dict]) -> dic
         FoundationPredictor(checkpoint=surya_settings.LAYOUT_MODEL_CHECKPOINT)
     )
 
-    images = []
-    page_nums = []
-    for rec in page_records:
-        img_path = project_dir / rec["image_path"]
-        images.append(Image.open(img_path).convert("RGB"))
-        page_nums.append(str(rec["page_number"]))
-
-    logger.info("  Running Surya layout detection on %d pages …", len(images))
-    predictions = layout_predictor(images)
-
+    n = len(page_records)
     raw_pages: dict[str, dict] = {}
-    for page_num, img, pred in zip(page_nums, images, predictions):
+
+    for i, rec in enumerate(page_records):
+        page_num = str(rec["page_number"])
+        logger.info("  Layout detection: page %d / %d …", i + 1, n)
+
+        img = Image.open(project_dir / rec["image_path"]).convert("RGB")
         W, H = img.size
+
+        # Call predictor with a single image so empty_cache() runs between
+        # every page.  Passing multiple images at once causes Surya to loop
+        # through them internally without releasing MPS/GPU cache between
+        # pages, which causes OOM on long documents.
+        (pred,) = layout_predictor([img])
+        img.close()
+        del img
+
         result: dict[str, list] = {
             "figures": [], "tables": [], "exclusions": [],
             "captions": [], "notes": [], "headings": [], "paragraphs": [],
@@ -228,12 +235,16 @@ def _analyze_all_pages_surya(project_dir: Path, page_records: list[dict]) -> dic
             if _valid_box(box):
                 result[category + "s"].append(box)
         raw_pages[page_num] = result
-        logger.info("  Page %s: %d figures, %d tables, %d exclusions, %d paragraphs",
-                    page_num,
-                    len(result["figures"]),
-                    len(result["tables"]),
-                    len(result["exclusions"]),
-                    len(result["paragraphs"]))
+        del pred
+        _empty_device_cache()
+        logger.info(
+            "  Page %s: %d figures, %d tables, %d exclusions, %d paragraphs",
+            page_num,
+            len(result["figures"]),
+            len(result["tables"]),
+            len(result["exclusions"]),
+            len(result["paragraphs"]),
+        )
 
     _assign_heading_levels(raw_pages)
     return raw_pages
@@ -316,3 +327,21 @@ def _make_region_id(prefix: str, page_num: str, idx: int, box: dict) -> dict:
     if prefix == "fig":
         result.setdefault("alt_text", "")
     return result
+
+
+def _empty_device_cache() -> None:
+    """Release PyTorch's cached (but freed) GPU/MPS tensors back to the OS.
+
+    Called between Surya batches so that prior-batch allocations don't
+    accumulate and push total memory over the MPS high-watermark limit.
+    """
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass

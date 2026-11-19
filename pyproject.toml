@@ -30,5 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 # Install with: uv sync --extra surya
 # Note: pulls in PyTorch (~500 MB); GPU strongly recommended for speed.
+# surya-ocr pinned to 0.17.x — 0.20+ ("Surya 2") replaced the torch models with a VLM run by
+#   vLLM/llama.cpp and changed the Python API (FoundationPredictor, text_lines …) that core/ uses
 # transformers pinned <5 — surya 0.17.x has a SuryaDecoderConfig bug triggered by transformers 5+
-surya = ["surya-ocr>=0.6", "transformers>=4.56.1,<5"]
+surya = ["surya-ocr>=0.17.1,<0.18", "transformers>=4.56.1,<5"]

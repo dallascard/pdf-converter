@@ -1248,7 +1248,7 @@ requires-dist = [
     { name = "pytesseract", specifier = ">=0.3.10" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.33.1" },
-    { name = "surya-ocr", marker = "extra == 'surya'", specifier = ">=0.6" },
+    { name = "surya-ocr", marker = "extra == 'surya'", specifier = ">=0.17.1,<0.18" },
     { name = "transformers", marker = "extra == 'surya'", specifier = ">=4.56.1,<5" },
     { name = "weasyprint", specifier = ">=60.0" },
 ]

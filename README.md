@@ -5,7 +5,7 @@ Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive p
 ## Features
 
 - **Surya layout detection** — figures, tables, and boilerplate (headers, footers, page numbers) are identified automatically before OCR runs; manual annotation and claude.ai import are also supported
-- **Surya / Tesseract OCR** — Surya produces better results (especially for math and multilingual text); Tesseract is a lighter fallback that still performs well
+- **Surya / Tesseract OCR** — Surya produces better results (especially for math and multilingual text); Tesseract is a lighter fallback that still performs well. Tesseract's pre-neural legacy engine, GOCR and GNU Ocrad (both early-2000s engines) are also available as deliberately weaker, historically representative baselines. Large vision models such as GLM-OCR and Qwen3-VL can be run through a local Ollama server
 - **Table extraction** — table regions are cropped, masked out of OCR pages, and OCR'd separately to produce clean Markdown tables
 - **Figure extraction** — image regions are cropped and saved separately; OCR never runs on figure interiors
 - **Alt-text generation** — optional step to write accessibility descriptions for figures, via Claude API or claude.ai (no API key required)
@@ -16,7 +16,11 @@ Convert scanned PDF documents to Markdown, HTML, and EPUB using an interactive p
 - **OCR Line Editor** — PyQt6 GUI for line-by-line OCR correction, with each line's image crop shown alongside its text field
 - **OCR Table Editor** — PyQt6 GUI for table-by-table OCR correction, with each table's image crop shown alongside its Markdown table
 - **Alt-text Editor** — PyQt6 GUI for editing alt-text for each figure, shown in context.
-- **Optional skew correction** — Automatically correct individual pages for slight rotation due to the scanning process.
+- **Auto-rotate** — Automatically detect and correct 90°/180°/270° page rotation using Surya header-position detection, before deskewing
+- **Skew correction** — Automatically correct small rotational skew (sub-degree) in scanned pages
+- **Image directory input** — Use a directory of TIF/PNG/JPG files as the source instead of a PDF; all downstream steps work without modification
+- **Export masked pages** — Export a PDF of the page images with any combination of region types (exclusions, figures, tables, etc.) painted white, useful for downstream processing or review
+- **Text JSON export** — Export per-page heading and body text, followed by that page's notes, as a simple JSON array (`output/document.json`); can be run directly after OCR without needing the Assemble step
 
 ## Workflow
 
@@ -24,16 +28,20 @@ This system uses an interactive, multi-step pipeline approach, emphasising human
 
 The steps involved are:
 
-1. Automatically split PDF into individual pages (Render). Optionally follow up with automatic skew correction.
-2. Run layout analysis to identify figures, tables, headings, captions, notes, and exclusion zones (or draw these manually if you prefer).
-3. Review, correct, and/or add bounding boxes in the Bounding Box Editor.
-4. Automatically extract figures and produce masked page images.
-5. Optionally, generate alt-text for figures (Claude API or claude.ai), then review in the Alt-Text Editor.
-6. Run OCR (Surya by default).
-7. Optionally, correct OCR lines in the OCR Editor and table content in the Table Editor.
-8. Automatically assemble everything into a Markdown document.
-9. Edit the Markdown directly in the Workbench (or any external editor) to fix heading levels, caption placement, endnote positions, etc.
-10. Export to HTML and/or EPUB, optionally including figures directly in a single output file.
+1. Load the source: either a PDF, or a directory of per-page image files (TIF, PNG, JPG, …). For PDFs, run Render to split into per-page PNGs.
+2. Optionally run Auto-rotate to fix pages that are 90°/180°/270° out of orientation.
+3. Optionally run Deskew to correct small rotational skew from scanning.
+4. Run layout analysis to identify figures, tables, headings, captions, notes, and exclusion zones (or draw these manually if you prefer).
+5. Review, correct, and/or add bounding boxes in the Bounding Box Editor.
+6. Automatically extract figures and produce masked page images (Confirm layout step).
+7. Optionally, generate alt-text for figures (Claude API or claude.ai), then review in the Alt-Text Editor.
+8. Run OCR (Surya by default).
+9. Optionally, correct OCR lines in the OCR Editor and table content in the Table Editor.
+10. Automatically assemble everything into a Markdown document.
+11. Edit the Markdown directly in the Workbench (or any external editor) to fix heading levels, caption placement, endnote positions, etc.
+12. Export to HTML and/or EPUB, optionally including figures directly in a single output file.
+13. Optionally, export masked pages as a PDF — choose which region types (exclusions, figures, tables, etc.) to paint white.
+14. Optionally, export per-page text as JSON — headings and body text followed by notes, one entry per page.
 
 Steps that have already produced output are not re-run unless you explicitly choose to overwrite them.
 
@@ -121,7 +129,13 @@ Each pipeline step can also be run directly from the command line, which is usef
 # 1. Render PDF pages to PNG images
 python cli.py render my_document.pdf
 
-# 1b. Optionally, correct rotational skew in scanned pages
+# Alternative to render: import a directory of per-page images (TIF, PNG, JPG, …)
+python cli.py import-pages /path/to/scans/ --project-dir data/my_document/
+
+# 1b. Optionally, fix pages that are 90°/180°/270° out of orientation
+python cli.py auto-rotate my_document.pdf
+
+# 1c. Optionally, correct small rotational skew in scanned pages
 python cli.py deskew my_document.pdf               # all pages
 python cli.py deskew my_document.pdf --pages 2,5   # specific pages only
 
@@ -163,6 +177,23 @@ python cli.py ocr my_document.pdf --engine surya
 # Option B: using tesseract (lighter-weight fallback)
 python cli.py ocr my_document.pdf --engine tesseract
 
+# Option C: Tesseract's legacy (pre-neural) engine, a weaker historical baseline
+# Needs legacy model files; see "Tesseract legacy engine" below
+python cli.py ocr my_document.pdf --engine tesseract-legacy
+
+# Option D: GOCR, an early-2000s engine (macOS: brew install gocr; Debian/Ubuntu: apt-get install gocr)
+python cli.py ocr my_document.pdf --engine gocr
+
+# Option E: GNU Ocrad, an early-2000s engine (macOS: brew install ocrad; Debian/Ubuntu: apt-get install ocrad)
+python cli.py ocr my_document.pdf --engine ocrad
+
+# Option F: a large vision model served by Ollama (see "Ollama engine" below)
+python cli.py ocr my_document.pdf --engine ollama                              # GLM-OCR (default)
+python cli.py ocr my_document.pdf --engine ollama --ollama-model qwen3-vl:8b
+
+# Option G: a larger vision model on a GPU server via vLLM (see "vLLM engine" below)
+python cli.py ocr --project-dir data/my_document --engine vllm
+
 # 7. Optionally, correct OCR output (line by line and tables)
 python gui/ocr_editor.py data/my_document/
 python gui/table_editor.py data/my_document/
@@ -174,9 +205,80 @@ python cli.py assemble my_document.pdf
 
 # 10. Export
 python cli.py export my_document.pdf --formats html,epub --self-contained
+
+# 11. Optionally, export page images as a PDF with selected regions masked white
+python cli.py export-masked my_document.pdf --mask exclusions
+python cli.py export-masked my_document.pdf --mask exclusions --mask figures --mask tables
+
+# 12. Optionally, export per-page text as JSON (can be run right after OCR, before assemble)
+python cli.py export-text my_document.pdf
 ```
 
 Surya requires PyTorch and downloads model weights on first use (~1–2 GB). It is slower than Tesseract on CPU but produces better results, especially for documents with math or non-English text.
+
+#### Tesseract legacy engine
+
+`--engine tesseract-legacy` runs Tesseract with `--oem 0`, the character-pattern engine used before Tesseract 4. It needs legacy model files, which Homebrew's Tesseract does not include. Download them into a separate folder and point `.env` at it:
+
+```bash
+mkdir -p ~/tessdata_legacy
+curl -L -o ~/tessdata_legacy/eng.traineddata \
+  https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
+echo 'TESSERACT_LEGACY_TESSDATA=~/tessdata_legacy' >> .env
+```
+
+For other languages, download the matching `<lang>.traineddata` into the same folder. Expect typographic ligature characters (`ﬁ`, `ﬂ`) in its output.
+
+#### GOCR
+
+`--engine gocr` runs GOCR and keeps its output as-is, to represent what OCR from that era produced: unrecognised characters stay as `_`, and stray lines GOCR invents (for example from descenders) are kept. Line positions come from GOCR's XML output; where GOCR reports an impossible line box, the box is rebuilt from the line's character positions. Tables use GOCR's plain-text output.
+
+#### Ocrad
+
+`--engine ocrad` runs GNU Ocrad, also keeping its output as-is (`_` for unrecognised characters). Line positions come from its results file (`ocrad -x`), with each line's box covering all of its character boxes. Ocrad sometimes reports a stray, oversized character box, which makes that line's box taller than the text. Tables use Ocrad's plain-text output.
+
+#### Ollama engine
+
+`--engine ollama` sends text to a large vision-language model running in [Ollama](https://ollama.com) on your own machine. Install Ollama, then pull a model:
+
+```bash
+ollama pull glm-ocr        # 0.9B document-OCR model, ~2.2 GB (default)
+ollama pull qwen3-vl:8b    # 8B general vision model, ~6 GB; slower, often stronger
+```
+
+In the Workbench, pick **GLM-OCR (Ollama)** or **Qwen3-VL-8B (Ollama)** from the OCR engine menu. On the command line, choose the model with `--ollama-model`, or set `OLLAMA_MODEL` in `.env`.
+
+These models return plain text rather than positioned lines, so the engine works one region at a time. Each paragraph and heading region from layout detection is cropped from the masked page and sent to the model on its own, and the returned lines are spread evenly down that region as approximate line boxes. Caption, note and table regions are each sent separately too. If a page has no paragraph regions, layout detection runs first (as for the Surya engine); failing that, the whole page is sent at once. Regions left blank by masking are skipped, because these models tend to invent text for empty images.
+
+#### vLLM engine (GPU server)
+
+`--engine vllm` works the same way as `--engine ollama`, but sends regions to a server that speaks the OpenAI-compatible API. That is usually [vLLM](https://docs.vllm.ai) running on a machine with GPUs, but SGLang and LM Studio work too. Several pages are OCR'd at once (`--concurrency`, default 16), so the server can batch requests and keep its GPUs busy.
+
+To run OCR on a GPU server:
+
+1. On your own machine, run every step up to and including `extract`. Make sure layout analysis has produced paragraph regions; the server doesn't need Surya if `boxes.json` already has them.
+2. Copy the repository and the project folder (`data/my_document/`) to the server, and run `uv sync` there.
+3. Start a model, for example:
+
+   ```bash
+   vllm serve Qwen/Qwen3-VL-8B-Instruct                               # fits on one GPU; good first test
+   vllm serve Qwen/Qwen3-VL-32B-Instruct --tensor-parallel-size 2     # split across two GPUs
+   ```
+
+4. In a second shell, run OCR (and, if you want it, the text export):
+
+   ```bash
+   python cli.py ocr --project-dir data/my_document --engine vllm --force
+   python cli.py export-text --project-dir data/my_document --force
+   ```
+
+   With one model served, it is picked automatically; otherwise use `--vllm-model`. Use `--vllm-host` if the server isn't at `http://localhost:8000`.
+
+5. Copy `ocr_raw.json` and `tables.json` (and `output/document.json`) back into the project folder on your own machine. **Delete your local `ocr_edited.json` if there is one**: later steps prefer it over `ocr_raw.json`, so old corrections would otherwise hide the new OCR.
+
+If you can reach the server over SSH while you work, you can skip the copying. Forward the port with `ssh -L 8000:localhost:8000 <server>` and run `--engine vllm` on your own machine.
+
+GLM-OCR (`zai-org/GLM-OCR`) automatically gets its own prompts. Every other model gets a plain transcription prompt. Dedicated OCR models (such as olmOCR 2, Chandra or dots.ocr) may do better with the prompt they were trained on, so set `VLLM_PROMPT` for those. Reasoning blocks (`<think>…</think>`), a leading YAML header and a wrapping code fence are stripped from replies. Each reply is capped at `VLLM_MAX_TOKENS`, and a warning is logged when a region hits the cap, which usually means the model fell into a loop.
 
 ---
 
@@ -235,12 +337,9 @@ Tables with captions are wrapped in `<figure markdown="1">` tags, which allows t
 
 ```html
 <figure markdown="1">
+  | Header 1 | Header 2 | | -------- | -------- | | Cell 1 | Cell 2 |
 
-| Header 1 | Header 2 |
-| -------- | -------- |
-| Cell 1   | Cell 2   |
-
-<figcaption>Table 1: This is a table caption.</figcaption>
+  <figcaption>Table 1: This is a table caption.</figcaption>
 </figure>
 ```
 
@@ -308,12 +407,12 @@ python gui/workbench.py my_document.pdf
 python gui/workbench.py          # opens a file chooser
 ```
 
-| Panel  | Contents                                                                                                                                                                                             |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Panel  | Contents                                                                                                                                                                                                                 |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Left   | Pipeline steps in order; each CLI step has a status dot (● green = done, ▶ yellow = running, ● grey = pending), an optional engine selector, and a ▶ Run button; GUI steps open the relevant editor as a separate window |
-| Centre | Continuous scrollable view of all pages with bounding-box overlays; Ctrl+scroll or pinch to zoom; ◀/▶ jump to previous/next page                                                                     |
-| Right  | Editable assembled Markdown with syntax highlighting, dark/light mode toggle, and font size controls; appears once the Assemble step has run                                                          |
-| Bottom | Log output from running CLI commands                                                                                                                                                                 
+| Centre | Continuous scrollable view of all pages with bounding-box overlays; Ctrl+scroll or pinch to zoom; ◀/▶ jump to previous/next page                                                                                         |
+| Right  | Editable assembled Markdown with syntax highlighting, dark/light mode toggle, and font size controls; appears once the Assemble step has run                                                                             |
+| Bottom | Log output from running CLI commands                                                                                                                                                                                     |
 
 - Clicking ▶ when a step's output already exists asks whether to overwrite.
 - The Markdown tab is editable; **💾 Save Markdown** writes back to `output/document.md`. Assemble warns you if there are unsaved edits.
@@ -415,6 +514,19 @@ All settings are in `config.py` and can be overridden via environment variables 
 | `CLAUDE_MODEL`          | `claude-opus-4-6` | Claude model used for alt-text generation                    |
 | `RENDER_DPI`            | `200`             | Page render resolution (try 300 for small print)             |
 | `TESSERACT_LANG`        | `eng`             | Tesseract language code                                      |
+| `TESSERACT_LEGACY_TESSDATA` | —             | Folder with legacy `<lang>.traineddata` files; required for `--engine tesseract-legacy` |
+| `SURYA_DEVICE`          | `cpu`             | Device for Surya models: `cpu`, `auto` (GPU if available), `mps`, or `cuda`. CPU avoids GPU out-of-memory errors on long documents |
+| `OLLAMA_MODEL`          | `glm-ocr`         | Model for `--engine ollama` (e.g. `qwen3-vl:8b`); must be pulled with `ollama pull` |
+| `OLLAMA_HOST`           | `http://localhost:11434` | Address of the Ollama server                           |
+| `OLLAMA_PROMPT`         | —                 | Custom text prompt for `--engine ollama`; by default GLM-OCR gets its own `Text Recognition:` prompt and other models a plain transcription instruction |
+| `OLLAMA_TIMEOUT`        | `600`             | Seconds to wait for each Ollama request                      |
+| `VLLM_HOST`             | `http://localhost:8000` | Address of the vLLM / OpenAI-compatible server for `--engine vllm` |
+| `VLLM_MODEL`            | —                 | Model for `--engine vllm`; empty = the one model the server serves |
+| `VLLM_API_KEY`          | —                 | Only needed if the server was started with `--api-key`       |
+| `VLLM_PROMPT`           | —                 | Custom text prompt for `--engine vllm` (same defaults as `OLLAMA_PROMPT`) |
+| `VLLM_CONCURRENCY`      | `16`              | Pages OCR'd in parallel with `--engine vllm`                 |
+| `VLLM_MAX_TOKENS`       | `4096`            | Output cap per region; stops runaway repetition              |
+| `VLLM_TIMEOUT`          | `600`             | Seconds to wait for each request                             |
 | `HEADER_ZONE_FRACTION`  | `0.08`            | Top fraction of page considered a potential header           |
 | `FOOTER_ZONE_FRACTION`  | `0.08`            | Bottom fraction of page considered a potential footer        |
 | `BOILERPLATE_MIN_PAGES` | `3`               | Min pages a zone must appear on to become a global exclusion |
@@ -425,17 +537,18 @@ All settings are in `config.py` and can be overridden via environment variables 
 
 ### Common options
 
-| Option                | Applies to       | Default        | Description                                                              |
-| --------------------- | ---------------- | -------------- | ------------------------------------------------------------------------ |
-| `--engine surya`      | `analyze`, `ocr` | `tesseract`    | Engine to use (`surya` or `tesseract` for OCR; `surya` only for analyze) |
-| `--dpi 300`           | `render`         | `200`          | Page render resolution                                                   |
-| `--pages 1,3,5`       | `deskew`         | all            | Limit to specific pages                                                  |
-| `--formats html,epub` | `export`         | `html`         | Output formats                                                           |
-| `--title "My Book"`   | `export`         | PDF filename   | Title for HTML/EPUB metadata                                             |
-| `--author "J. Smith"` | `export`         | —              | Author for EPUB metadata                                                 |
-| `--self-contained`    | `export`         | off            | Embed images as base64 in HTML output                                    |
-| `--project-dir /path` | all              | `data/<stem>/` | Where to store project files                                             |
-| `--force`             | most steps       | off            | Re-run step even if output exists                                        |
+| Option                | Applies to              | Default        | Description                                                              |
+| --------------------- | ----------------------- | -------------- | ------------------------------------------------------------------------ |
+| `--engine surya`      | `analyze`, `ocr`        | `tesseract`    | Engine to use (`surya`, `tesseract`, `tesseract-legacy`, `gocr`, `ocrad`, `ollama` or `vllm` for OCR; `surya` only for analyze) |
+| `--dpi 300`           | `render`                | `200`          | Page render resolution                                                   |
+| `--pages 1,3,5`       | `deskew`, `auto-rotate` | all            | Limit to specific pages                                                  |
+| `--formats html,epub` | `export`                | `html`         | Output formats                                                           |
+| `--title "My Book"`   | `export`                | PDF filename   | Title for HTML/EPUB metadata                                             |
+| `--author "J. Smith"` | `export`                | —              | Author for EPUB metadata                                                 |
+| `--self-contained`    | `export`                | off            | Embed images as base64 in HTML output                                    |
+| `--mask exclusions`   | `export-masked`         | `exclusions`   | Region type to paint white; repeat for multiple types                    |
+| `--project-dir /path` | all                     | `data/<stem>/` | Where to store project files                                             |
+| `--force`             | most steps              | off            | Re-run step even if output exists                                        |
 
 ---
 
@@ -448,13 +561,15 @@ data/my_document/
 ├── pages/                  # Rendered page PNGs (original)
 │   ├── page_0001.png
 │   └── ...
-├── pages_masked/           # Pages with figures and boilerplate masked out
+├── pages_masked/           # Pages with figures and boilerplate masked out (for OCR)
 │   └── masked_0001.png
-├── images/                 # Extracted figure crops
+├── images/                 # Extracted figure and table crops
 │   ├── fig_1_1.png
 │   └── ...
-├── pages.json              # Page manifest (paths, dimensions)
-├── boxes.json              # Bounding boxes (figures, tables, exclusion zones)
+├── pages.json              # Page manifest (paths, dimensions, DPI)
+├── rotate.json             # Auto-rotate results (written by auto-rotate step)
+├── deskew.json             # Deskew results (written by deskew step)
+├── boxes.json              # Bounding boxes (figures, tables, exclusion zones, …)
 ├── figures.json            # Figure metadata (crop paths, alt-text)
 ├── tables.json             # Table metadata (crop paths, OCR content)
 ├── ocr_raw.json            # Raw OCR output from Surya/Tesseract
@@ -463,9 +578,10 @@ data/my_document/
 └── output/
     ├── document.md
     ├── document.html
-    └── document.epub
+    ├── document.epub
+    ├── masked_pages.pdf    # Written by export-masked (optional)
+    └── document.json       # Written by export-text (optional)
 ```
-
 
 ## License
 
