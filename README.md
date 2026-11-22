@@ -154,8 +154,14 @@ python cli.py init-boxes my_document.pdf
 # 3. Edit bounding boxes
 python gui/bbox_editor.py data/my_document/
 
-# 4. Extract figures and produce masked page images
+# 4. Extract figures and produce masked page images ("Confirm layout" in the Workbench).
+#    Re-run with --force after any later box edits: OCR reads these masked pages,
+#    and refuses to run if boxes.json has changed since (override: --skip-layout-check)
 python cli.py extract my_document.pdf
+
+#    Check whether the masked pages still match boxes.json, and whether existing
+#    OCR output was made from out-of-date masks
+python cli.py check-layout my_document.pdf
 
 # 5. Optionally, generate alt-text for figures
 
@@ -261,9 +267,11 @@ To run OCR on a GPU server:
 3. Start a model, for example:
 
    ```bash
-   vllm serve Qwen/Qwen3-VL-8B-Instruct                               # fits on one GPU; good first test
-   vllm serve Qwen/Qwen3-VL-32B-Instruct --tensor-parallel-size 2     # split across two GPUs
+   vllm serve Qwen/Qwen3-VL-8B-Instruct --max-model-len 16384                            # one GPU; good first test
+   vllm serve Qwen/Qwen3-VL-32B-Instruct --tensor-parallel-size 2 --max-model-len 16384  # split across two GPUs
    ```
+
+   Always set `--max-model-len`. Qwen3-VL defaults to a 262,144-token context, which reserves more GPU memory than an A6000 has; each request here is a single region, so 16384 is plenty. Recent vLLM releases default to CUDA 13 and need a recent NVIDIA driver. With a CUDA 12.x driver, install a `cu129` build: vLLM 0.32.0 is the newest release that has one.
 
 4. In a second shell, run OCR (and, if you want it, the text export):
 
@@ -278,7 +286,40 @@ To run OCR on a GPU server:
 
 If you can reach the server over SSH while you work, you can skip the copying. Forward the port with `ssh -L 8000:localhost:8000 <server>` and run `--engine vllm` on your own machine.
 
-GLM-OCR (`zai-org/GLM-OCR`) automatically gets its own prompts. Every other model gets a plain transcription prompt. Dedicated OCR models (such as olmOCR 2, Chandra or dots.ocr) may do better with the prompt they were trained on, so set `VLLM_PROMPT` for those. Reasoning blocks (`<think>…</think>`), a leading YAML header and a wrapping code fence are stripped from replies. Each reply is capped at `VLLM_MAX_TOKENS`, and a warning is logged when a region hits the cap, which usually means the model fell into a loop.
+##### Supported OCR models
+
+Each dedicated OCR model was trained with its own instruction and output format. The engine recognises the model from its name and uses that model's own prompts, request settings and output cleanup, copied from each project's inference code (see `core/vlm_profiles.py`). Recognition is by substring, so keep the model's name in any `--served-model-name`. Any other model gets a plain "transcribe this text" prompt.
+
+| Model | Size | Licence | Serve with |
+|---|---|---|---|
+| PaddleOCR-VL-1.6 | 0.9B | Apache 2.0 | `vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code --max-num-batched-tokens 16384 --no-enable-prefix-caching --mm-processor-cache-gb 0` |
+| GLM-OCR | 0.9B | MIT | `vllm serve zai-org/GLM-OCR --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
+| OvisOCR2 | 0.8B | Apache 2.0 | `vllm serve ATH-MaaS/OvisOCR2 --max-model-len 16384 --limit-mm-per-prompt '{"image": 1}' --mm-processor-cache-gb 0 --no-enable-prefix-caching` |
+| MinerU2.5-Pro | 1.2B | see model card | `vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B` |
+| TeleOCR | 1.2B | Apache 2.0 | needs its vLLM plugin, which pins vLLM 0.11.0: use a separate environment (below) |
+| dots.mocr | 3B | MIT | `vllm serve rednote-hilab/dots.mocr --trust-remote-code --chat-template-content-format string` |
+| Chandra OCR 2 | 5.3B | modified OpenRAIL-M (free for research, personal use and small startups) | `vllm serve datalab-to/chandra-ocr-2 --max-model-len 16384` |
+| olmOCR 2 | 7B | Apache 2.0 | `vllm serve allenai/olmOCR-2-7B-1025 --max-model-len 16384` |
+| Qwen3-VL (general model, baseline) | 8B / 32B | Apache 2.0 | see above |
+
+TeleOCR's custom model code only works with vLLM 0.11.0, so give it its own environment:
+
+```bash
+git clone https://github.com/caipeng328/TeleOCR.git
+uv venv ~/teleocr-env --python 3.10 && source ~/teleocr-env/bin/activate
+uv pip install vllm==0.11.0 ./TeleOCR/TeleOCR-vllm
+vllm serve XingChen-AGI/TeleOCR --max-model-len 16384
+```
+
+What differs between models:
+
+- **Prompts:** most use a short task prompt (`OCR:`, `Text Recognition:`, `Please output the text content from the image.`); OvisOCR2, Chandra and olmOCR use their full-page parsing prompt for every region.
+- **Request settings:** MinerU and TeleOCR get their system prompt and presence/frequency penalties against repetition; GLM-OCR gets `repetition_penalty 1.1`; everything is greedy (temperature 0).
+- **Image preparation:** very elongated crops (such as a single heading line) are padded to at most 50:1, and small crops are upscaled to each model's minimum size.
+- **Output:** Markdown and HTML markup is removed from text (Chandra's HTML, `#` headings, `**bold**`, image placeholders), keeping `<math>` for the exporter. Table replies in HTML (Chandra, olmOCR, OvisOCR2) or OTSL (PaddleOCR-VL, MinerU, TeleOCR) are converted to Markdown tables; merged cells become empty cells.
+- **Line breaks:** Chandra's prompt asks it to join printed lines into paragraphs, so its regions come back as one line per paragraph.
+
+Set `VLLM_PROMPT` to override a model's text prompt. Reasoning blocks (`<think>…</think>`), a leading YAML header (olmOCR) and a wrapping code fence are stripped from replies. Each reply is capped at `VLLM_MAX_TOKENS`, and a warning is logged when a region hits the cap, which usually means the model fell into a loop.
 
 ---
 
@@ -518,7 +559,7 @@ All settings are in `config.py` and can be overridden via environment variables 
 | `SURYA_DEVICE`          | `cpu`             | Device for Surya models: `cpu`, `auto` (GPU if available), `mps`, or `cuda`. CPU avoids GPU out-of-memory errors on long documents |
 | `OLLAMA_MODEL`          | `glm-ocr`         | Model for `--engine ollama` (e.g. `qwen3-vl:8b`); must be pulled with `ollama pull` |
 | `OLLAMA_HOST`           | `http://localhost:11434` | Address of the Ollama server                           |
-| `OLLAMA_PROMPT`         | —                 | Custom text prompt for `--engine ollama`; by default GLM-OCR gets its own `Text Recognition:` prompt and other models a plain transcription instruction |
+| `OLLAMA_PROMPT`         | —                 | Custom text prompt for `--engine ollama`; by default each known OCR model gets its own prompt (`core/vlm_profiles.py`) and other models a plain transcription instruction |
 | `OLLAMA_TIMEOUT`        | `600`             | Seconds to wait for each Ollama request                      |
 | `VLLM_HOST`             | `http://localhost:8000` | Address of the vLLM / OpenAI-compatible server for `--engine vllm` |
 | `VLLM_MODEL`            | —                 | Model for `--engine vllm`; empty = the one model the server serves |
@@ -562,7 +603,8 @@ data/my_document/
 │   ├── page_0001.png
 │   └── ...
 ├── pages_masked/           # Pages with figures and boilerplate masked out (for OCR)
-│   └── masked_0001.png
+│   ├── masked_0001.png
+│   └── layout_stamp.json   # Fingerprint of the boxes each mask was made from (checked before OCR)
 ├── images/                 # Extracted figure and table crops
 │   ├── fig_1_1.png
 │   └── ...

@@ -39,6 +39,7 @@ from PIL import Image, ImageDraw
 
 import config
 from core.layout_analyzer import load_boxes
+from core.layout_check import mask_zones, write_layout_stamp
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +90,7 @@ def extract_figures(
         page_boxes = boxes.get("pages", {}).get(page_str, {})
         figures              = page_boxes.get("figures", [])
         tables               = page_boxes.get("tables", [])
-        per_page_exclusions  = page_boxes.get("exclusions", [])
         global_exclusions    = boxes.get("global_exclusions", [])
-        captions             = page_boxes.get("captions", [])
-        notes                = page_boxes.get("notes", [])
 
         # --- Crop figures ---------------------------------------------------
         for fig in figures:
@@ -126,28 +124,36 @@ def extract_figures(
             logger.debug("  Cropped table %s", tbl_id)
 
         # --- Build masked page image ----------------------------------------
-        # Mask figures, tables, exclusions, captions, and notes before OCR.
-        # Caption and note zones are OCR'd separately in the ocr step so their
-        # text isn't merged with the main body text by the OCR engine.
-        masked = img.copy()
-        draw = ImageDraw.Draw(masked)
-        zones_to_mask = figures + tables + per_page_exclusions + global_exclusions + captions + notes
-        for zone in zones_to_mask:
-            _paint_box(draw, zone, W, H, colour=config.MASK_COLOUR)
-
+        masked = mask_page(img, page_boxes, global_exclusions)
         masked_filename = f"masked_{page_num:04d}.png"
         masked.save(masked_dir / masked_filename, format="PNG")
         rec["masked_image_path"] = str(Path("pages_masked") / masked_filename)
-        logger.debug("  Masked page %d (%d zones)", page_num, len(zones_to_mask))
+        logger.debug("  Masked page %d", page_num)
         print(f"EXTRACT_PROGRESS {page_idx + 1}/{n_pages}", flush=True)
 
     # Persist updated page records (with masked_image_path added)
     (project_dir / "pages.json").write_text(json.dumps(page_records, indent=2))
+    # Fingerprint the masks so OCR can tell if boxes.json changes afterwards
+    write_layout_stamp(project_dir, page_records, boxes)
 
     figures_path.write_text(json.dumps(figure_records, indent=2))
     tables_path.write_text(json.dumps(table_records, indent=2))
     logger.info("Extracted %d figures, %d tables.", len(figure_records), len(table_records))
     return figure_records, table_records
+
+
+def mask_page(img: Image.Image, page_boxes: dict, global_exclusions: list[dict]) -> Image.Image:
+    """Return a copy of *img* with figures, tables, exclusions, captions and notes painted white.
+
+    Caption and note zones are OCR'd separately in the ocr step so their
+    text isn't merged with the main body text by the OCR engine.
+    """
+    W, H = img.size
+    masked = img.copy()
+    draw = ImageDraw.Draw(masked)
+    for _kind, zone in mask_zones(page_boxes, global_exclusions):
+        _paint_box(draw, zone, W, H, colour=config.MASK_COLOUR)
+    return masked
 
 
 def load_figures(project_dir: Path) -> list[dict]:

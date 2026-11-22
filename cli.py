@@ -35,6 +35,7 @@ Step descriptions
   init-boxes       Create empty boxes.json for fully manual annotation
   import-boxes     Import boxes.json produced via claude.ai
   extract          Crop figures/tables, produce masked page images for OCR
+  check-layout     Check masked pages still match boxes.json (and whether OCR used stale masks)
   compress-figures Compress extracted figure/table crops to JPEG (optional; shrinks exports)
   get-alt-text     Generate alt-text for figures via Claude API
   export-boxes     Export figure list for manual alt-text via claude.ai
@@ -62,6 +63,7 @@ from core.image_compressor import compress_figures
 from core.alt_text import run_alt_text, export_alt_text_prompt, import_alt_text_response
 from core.layout_analyzer import analyze_layout
 from core.figure_extractor import extract_figures, load_tables
+from core.layout_check import StaleLayoutError, layout_report
 from core.ocr import run_ocr, load_ocr
 from core.structure import build_structure
 from core.assembler import assemble_markdown
@@ -416,8 +418,15 @@ def import_alt_text_cmd(pdf_file, project_dir, json_file):
               help="Server address for --engine vllm (default: VLLM_HOST from .env, else http://localhost:8000).")
 @click.option("--concurrency", default=None, type=int,
               help="Pages OCR'd in parallel with --engine vllm (default: VLLM_CONCURRENCY, else 16).")
-def ocr(pdf_file, project_dir, force, engine, ollama_model, vllm_model, vllm_host, concurrency):
-    """Run OCR on masked page images."""
+@click.option("--skip-layout-check", is_flag=True,
+              help="OCR even if the masked pages are missing or don't match boxes.json.")
+def ocr(pdf_file, project_dir, force, engine, ollama_model, vllm_model, vllm_host, concurrency,
+        skip_layout_check):
+    """Run OCR on masked page images.
+
+    Refuses to run if boxes.json changed since the last 'extract'
+    (Confirm layout), since OCR would read out-of-date masks.
+    """
     import json
     if ollama_model:
         config.OLLAMA_MODEL = ollama_model
@@ -429,10 +438,44 @@ def ocr(pdf_file, project_dir, force, engine, ollama_model, vllm_model, vllm_hos
         config.VLLM_CONCURRENCY = concurrency
     proj = _resolve_project_dir(pdf_file, project_dir)
     pages = json.loads((proj / "pages.json").read_text())
-    results = run_ocr(proj, pages, engine=engine, force=force)
+    try:
+        results = run_ocr(proj, pages, engine=engine, force=force,
+                          check_layout=not skip_layout_check)
+    except StaleLayoutError as exc:
+        raise click.ClickException(str(exc))
     total_lines = sum(len(r.get("lines", [])) for r in results)
     click.echo(f"OCR complete: {len(results)} pages, {total_lines} lines.")
     click.echo(f"Review OCR with:  python gui/ocr_editor.py {proj}")
+
+
+# ---------------------------------------------------------------------------
+# check-layout
+# ---------------------------------------------------------------------------
+
+@cli.command("check-layout")
+@_pdf_argument
+@_project_dir_option
+def check_layout_cmd(pdf_file, project_dir):
+    """Check that the masked pages match boxes.json, and whether OCR used them.
+
+    Redraws every page's masks from the current boxes.json and compares
+    them pixel by pixel with pages_masked/.  Exits with status 1 if any
+    page differs.
+    """
+    import json
+    proj = _resolve_project_dir(pdf_file, project_dir)
+    pages = json.loads((proj / "pages.json").read_text())
+    problems, summary = layout_report(proj, pages)
+    for p in problems:
+        if p["problem"] == "missing":
+            click.echo(f"  page {p['page']}: no masked image")
+        for d in p["details"]:
+            click.echo(f"  page {p['page']}: {d}")
+    if problems:
+        click.echo("")
+    for line in summary:
+        click.echo(line)
+    sys.exit(1 if problems else 0)
 
 
 # ---------------------------------------------------------------------------

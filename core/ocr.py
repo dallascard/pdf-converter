@@ -56,6 +56,8 @@ from pathlib import Path
 
 import config
 from core.layout_analyzer import ensure_paragraph_boxes
+from core.layout_check import ensure_masks_current
+from core import vlm_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +71,13 @@ def run_ocr(
     page_records: list[dict],
     engine: str = "tesseract",
     force: bool = False,
+    check_layout: bool = True,
 ) -> list[dict]:
     """
     Run OCR on all pages and write *project_dir/ocr_raw.json*.
+
+    Unless *check_layout* is False, first raises StaleLayoutError if the
+    masked pages are missing or don't match boxes.json (layout not confirmed).
 
     *engine* is ``"surya"``, ``"tesseract"``, ``"tesseract-legacy"``, ``"gocr"``, ``"ocrad"``, ``"ollama"``, or ``"vllm"``.
     After page OCR, table crops (if any) are also OCR'd and saved to tables.json.
@@ -84,6 +90,8 @@ def run_ocr(
         logger.info("ocr_raw.json exists; skipping OCR step.")
         return json.loads(ocr_path.read_text())
 
+    if check_layout:
+        ensure_masks_current(project_dir, page_records)
     if engine == "tesseract-legacy":
         _check_legacy_tessdata()
     if engine in ("gocr", "ocrad") and shutil.which(engine) is None:
@@ -92,6 +100,8 @@ def run_ocr(
         _check_ollama()
     if engine == "vllm":
         _check_vllm()
+    if engine in _VLM_ENGINES:
+        logger.info("Prompt profile for %s: %s", _vlm_model(engine), _vlm_profile(engine)["name"])
 
     # Remove stale edited file so downstream steps and the editor use fresh output
     edited_path = project_dir / "ocr_edited.json"
@@ -784,36 +794,25 @@ def _ocr_table_ocrad(crop_path: Path) -> tuple[str, str]:
 # These models return text for a whole image rather than positioned lines, so
 # each layout region is sent separately and its returned lines are given
 # equal-height slices of the region as approximate boxes.  The two engines
-# differ only in how a request reaches the model (_vlm_generate).
+# differ only in how a request reaches the model (_vlm_generate).  Each
+# model's prompt, request settings and output cleanup live in vlm_profiles.
 
 _VLM_ENGINES = frozenset({"ollama", "vllm"})
-
-_GENERIC_TEXT_PROMPT = (
-    "Transcribe all text in this image exactly as written, one output line per "
-    "printed line. Keep original spelling and punctuation. Output only the text."
-)
-_GENERIC_TABLE_PROMPT = "Transcribe this table as a Markdown table. Output only the table."
-_FENCE_RE = re.compile(r"^```[\w-]*\n(.*?)\n?```$", re.S)
-_THINK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.S)        # reasoning ("Thinking") variants
-_FRONT_MATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.S)        # e.g. olmOCR's YAML header
 
 
 def _vlm_model(engine: str) -> str:
     return config.VLLM_MODEL if engine == "vllm" else config.OLLAMA_MODEL
 
 
-def _is_glm_ocr(engine: str) -> bool:
-    # Ollama: "glm-ocr[:tag]"; vLLM: Hugging Face id such as "zai-org/GLM-OCR"
-    return _vlm_model(engine).split(":")[0].lower().endswith("glm-ocr")
+def _vlm_profile(engine: str) -> dict:
+    return vlm_profiles.profile_for(_vlm_model(engine))
 
 
 def _vlm_prompt(engine: str, table: bool = False) -> str:
     custom = config.VLLM_PROMPT if engine == "vllm" else config.OLLAMA_PROMPT
     if not table and custom:
         return custom
-    if _is_glm_ocr(engine):
-        return "Table Recognition:" if table else "Text Recognition:"
-    return _GENERIC_TABLE_PROMPT if table else _GENERIC_TEXT_PROMPT
+    return _vlm_profile(engine)["table" if table else "text"]
 
 
 def _http_json(url: str, payload: dict | None = None, timeout: int = 10, headers: dict | None = None):
@@ -858,14 +857,21 @@ def _check_ollama() -> None:
         raise RuntimeError(f"Ollama model '{model}' is not pulled. Run: ollama pull {model}")
 
 
-def _ollama_generate(img, prompt: str) -> str:
-    resp = _http_json(_host_url(config.OLLAMA_HOST, "/api/generate"), {
+def _ollama_generate(img, prompt: str, profile: dict, sampling: dict) -> str:
+    options = {"temperature": 0}
+    for key, value in sampling.items():         # Ollama spells repetition_penalty differently
+        options["repeat_penalty" if key == "repetition_penalty" else key] = value
+    payload = {
         "model": config.OLLAMA_MODEL,
         "prompt": prompt,
         "images": [_png_b64(img)],
         "stream": False,
-        "options": {"temperature": 0},
-    }, timeout=config.OLLAMA_TIMEOUT)
+        "options": options,
+    }
+    if profile.get("system"):
+        payload["system"] = profile["system"]
+    resp = _http_json(_host_url(config.OLLAMA_HOST, "/api/generate"), payload,
+                      timeout=config.OLLAMA_TIMEOUT)
     return resp.get("response", "")
 
 
@@ -900,15 +906,18 @@ def _check_vllm() -> None:
     logger.info("vLLM model: %s (%d pages in parallel)", config.VLLM_MODEL, config.VLLM_CONCURRENCY)
 
 
-def _vllm_generate(img, prompt: str) -> str:
+def _vllm_generate(img, prompt: str, profile: dict, sampling: dict) -> str:
+    messages = [{"role": "system", "content": profile["system"]}] if profile.get("system") else []
+    messages.append({"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_png_b64(img)}"}},
+        {"type": "text", "text": prompt},
+    ]})
     resp = _http_json(_host_url(config.VLLM_HOST, "/v1/chat/completions"), {
         "model": config.VLLM_MODEL,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_png_b64(img)}"}},
-            {"type": "text", "text": prompt},
-        ]}],
+        "messages": messages,
         "temperature": 0,
         "max_tokens": config.VLLM_MAX_TOKENS,
+        **sampling,          # vLLM accepts top_k / repetition_penalty alongside the OpenAI fields
     }, timeout=config.VLLM_TIMEOUT, headers=_vllm_headers())
     choice = resp["choices"][0]
     if choice.get("finish_reason") == "length":
@@ -919,13 +928,13 @@ def _vllm_generate(img, prompt: str) -> str:
 
 # -- Shared -------------------------------------------------------------------
 
-def _vlm_generate(engine: str, img, prompt: str) -> str:
-    """Send one image + prompt to the engine's server; return the model's text, unwrapped."""
-    text = (_vllm_generate if engine == "vllm" else _ollama_generate)(img, prompt).strip()
-    text = _THINK_RE.sub("", text)
-    text = _FRONT_MATTER_RE.sub("", text).strip()
-    fenced = _FENCE_RE.match(text)
-    return fenced.group(1).strip() if fenced else text
+def _vlm_generate(engine: str, img, table: bool = False) -> str:
+    """Send one image to the engine's server with the model's own prompt; return its raw reply."""
+    profile = _vlm_profile(engine)
+    sampling = profile.get("table_sampling" if table else "sampling") or profile.get("sampling", {})
+    generate = _vllm_generate if engine == "vllm" else _ollama_generate
+    return generate(vlm_profiles.prepare_image(img, profile), _vlm_prompt(engine, table),
+                    profile, sampling)
 
 
 def _is_blank(img) -> bool:
@@ -948,12 +957,11 @@ def _vlm_region_lines(engine: str, img, region: dict) -> list[dict]:
     if _is_blank(crop):
         return []
     try:
-        text = _vlm_generate(engine, crop, _vlm_prompt(engine))
+        texts = vlm_profiles.text_lines(_vlm_generate(engine, crop))
     except Exception as exc:
         logger.warning("%s OCR failed for a region: %s", engine, exc)
         return []
 
-    texts = [t.strip() for t in text.splitlines() if t.strip()]
     slice_h = region["h"] / len(texts) if texts else 0
     return [
         {"text": t,
@@ -984,13 +992,10 @@ def _ocr_vlm_page(engine: str, img_path: Path, page_num: int, page_boxes: dict) 
 
 
 def _ocr_table_vlm(engine: str, crop_path: Path) -> tuple[str, str]:
-    """OCR a table crop; Markdown if every line looks like a table row."""
+    """OCR a table crop; HTML and OTSL replies are converted to Markdown tables."""
     try:
         from PIL import Image
-        text = _vlm_generate(engine, Image.open(crop_path), _vlm_prompt(engine, table=True))
-        rows = [r for r in text.splitlines() if r.strip()]
-        is_md = bool(rows) and all(r.lstrip().startswith("|") for r in rows)
-        return text, "markdown" if is_md else "preformatted"
+        return vlm_profiles.table_content(_vlm_generate(engine, Image.open(crop_path), table=True))
     except Exception as exc:
         logger.warning("%s table OCR failed for %s: %s", engine, crop_path.name, exc)
         return "", ""

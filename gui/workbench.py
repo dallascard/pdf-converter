@@ -885,6 +885,36 @@ class WorkbenchWindow(QMainWindow):
             # Discard → fall through
 
         extra: list[str] = []
+        # Guard: OCR reads the masked pages made by Confirm layout; warn if
+        # boxes were edited since.  (Projects with no layout stamp yet are
+        # checked pixel-by-pixel by the ocr command itself.)
+        if step["key"] == "ocr" and self._proj_dir is not None:
+            from core.layout_check import stale_pages_fast
+            try:
+                pages = json.loads((self._proj_dir / "pages.json").read_text())
+                stale = stale_pages_fast(self._proj_dir, pages)
+            except Exception:
+                stale = None
+            if stale:
+                shown = ", ".join(str(p) for p in stale[:15]) + (" …" if len(stale) > 15 else "")
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setWindowTitle("Layout not confirmed")
+                box.setText(
+                    f"The boxes on {len(stale)} page(s) ({shown}) have changed since "
+                    "the last Confirm layout, so OCR would read out-of-date masked pages."
+                )
+                confirm_btn = box.addButton("Run Confirm layout", QMessageBox.ButtonRole.AcceptRole)
+                anyway_btn = box.addButton("Run OCR anyway", QMessageBox.ButtonRole.DestructiveRole)
+                box.addButton(QMessageBox.StandardButton.Cancel)
+                box.setDefaultButton(confirm_btn)
+                box.exec()
+                if box.clickedButton() is confirm_btn:
+                    self._run_cli_step("extract", "extract", None, ["--force"])
+                    return
+                if box.clickedButton() is not anyway_btn:
+                    return
+                extra.append("--skip-layout-check")
         if step.get("engine") and step["key"] in self._engine_combos:
             extra += self._engine_combos[step["key"]].currentData()
         if step["key"] == "export":
