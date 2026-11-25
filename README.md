@@ -321,6 +321,80 @@ What differs between models:
 
 Set `VLLM_PROMPT` to override a model's text prompt. Reasoning blocks (`<think>…</think>`), a leading YAML header (olmOCR) and a wrapping code fence are stripped from replies. Each reply is capped at `VLLM_MAX_TOKENS`, and a warning is logged when a region hits the cap, which usually means the model fell into a loop.
 
+##### Server setup notes
+
+These are what it took to get vLLM running on a server with an older driver (CUDA 12.5), two A6000s and an A5000, and no CUDA toolkit:
+
+- **Separate environment.** vLLM goes in its own environment (`uv venv ~/vllm-env`), not this project's: it needs its own torch version.
+- **CUDA 12 driver.** Install the vLLM 0.32.0 `cu129` wheel from the [release page](https://github.com/vllm-project/vllm/releases/tag/v0.32.0) (Assets → the `cu129`/`x86_64` file): `uv pip install "<wheel URL>" --torch-backend=cu129`. A 12.9 build runs on a 12.5 driver thanks to CUDA minor-version compatibility.
+- **Mixed GPUs.** Without `CUDA_DEVICE_ORDER=PCI_BUS_ID`, CUDA numbers cards fastest first, which may not match `nvidia-smi`. Add the defaults to the environment's activation script, so `source ~/vllm-env/bin/activate` sets them:
+
+  ```bash
+  cat >> ~/vllm-env/bin/activate <<'EOF'
+  export CUDA_DEVICE_ORDER=PCI_BUS_ID
+  export CUDA_VISIBLE_DEVICES=0,1
+  export VLLM_USE_FLASHINFER_SAMPLER=0
+  EOF
+  ```
+
+  Override `CUDA_VISIBLE_DEVICES=0` on the command line to use one card for a small model.
+- **No `nvcc`.** FlashInfer compiles kernels at startup and fails with `Could not find nvcc`. `VLLM_USE_FLASHINFER_SAMPLER=0` plus `--attention-backend FLASH_ATTN` avoids it. Alternatively, install the CUDA 12.9 toolkit into your home directory and set `CUDA_HOME` and `PATH` in the activation script.
+- **`Connection refused` from the CLI** usually means vLLM crashed after startup; check its log.
+- **Keep it running with tmux**, and stop it with a single Ctrl+C. Check with `nvidia-smi` that the memory was freed, and `kill <PID>` any leftover worker.
+
+##### Trying a model, step by step
+
+Use PaddleOCR-VL-1.6 on one A6000 as an example. For other models, take the serve command from the table above and add the server flags.
+
+1. **Copy the current code to the server.** Code that hasn't been committed won't come over with `git pull`, so copy it from your own machine:
+
+   ```bash
+   rsync -av --exclude .venv --exclude data --exclude __pycache__ pdf-converter/ <server>:~/pdf-converter/
+   ```
+
+2. **Start the server** in tmux (`tmux new -s vllm`, detach with Ctrl+B then D):
+
+   ```bash
+   source ~/vllm-env/bin/activate
+   CUDA_VISIBLE_DEVICES=0 vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code \
+     --max-model-len 16384 --max-num-batched-tokens 16384 \
+     --no-enable-prefix-caching --mm-processor-cache-gb 0 --attention-backend FLASH_ATTN
+   ```
+
+   Wait for `Application startup complete`, then check with `curl http://localhost:8000/v1/models`.
+
+3. **OCR a copy of the project**, so earlier results stay available for comparison:
+
+   ```bash
+   cp -r data/my_document data/my_document_paddle
+   python cli.py ocr --project-dir data/my_document_paddle --engine vllm --force
+   python cli.py export-text --project-dir data/my_document_paddle --force
+   ```
+
+   The log should show `Prompt profile for PaddlePaddle/PaddleOCR-VL-1.6: paddleocr-vl` right after the `vLLM model:` line. If that line is missing, the server has old code (go back to step 1). If it says `generic`, the model name wasn't recognised.
+
+4. **Compare** a page against another run:
+
+   ```bash
+   python - <<'EOF'
+   import json
+   a = json.load(open("data/my_document/output/document.json"))
+   b = json.load(open("data/my_document_paddle/output/document.json"))
+   p = 10
+   print("=== before ===\n" + a[p-1]["text"] + "\n\n=== PaddleOCR-VL ===\n" + b[p-1]["text"])
+   EOF
+   ```
+
+5. **Stop the server**: `tmux attach -t vllm`, Ctrl+C, then `nvidia-smi` to check the GPU is free.
+
+**Chandra OCR 2** (5.3B) also fits on one A6000. It is a standard Qwen-VL-style model, so it doesn't need PaddleOCR's extra flags:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 vllm serve datalab-to/chandra-ocr-2 --max-model-len 16384 --attention-backend FLASH_ATTN
+```
+
+Expect `Prompt profile for datalab-to/chandra-ocr-2: chandra`. It returns one line per paragraph (see above), it is slower per region than the 1B models because of its size and long prompt, and if the log warns that regions hit the token cap, set `VLLM_MAX_TOKENS=8192` in `.env`.
+
 ---
 
 ### Editing the Markdown
